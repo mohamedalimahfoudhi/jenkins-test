@@ -1,0 +1,30 @@
+#!/bin/sh
+# DevSecOps Phase 1 - client-side secrets scan before a commit is created.
+#
+# Install once per clone (Windows or Linux):
+#   git config core.hooksPath .githooks
+#
+# Requires gitleaks on PATH. Scans only the staged changes, so a commit that
+# introduces a secret is refused before it ever reaches the repository.
+
+set -eu
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+    echo "pre-commit: gitleaks not found on PATH." >&2
+    echo "pre-commit: install it (see docs/development-setup.md) or commit with: git commit --no-verify" >&2
+    exit 1
+fi
+
+echo "pre-commit: scanning staged changes with gitleaks..."
+
+# --staged scans the index, --pre-commit uses the git diff of this commit.
+if gitleaks git --pre-commit --staged --redact --verbose; then
+    echo "pre-commit: no secrets found, commit allowed."
+    exit 0
+else
+    echo "" >&2
+    echo "pre-commit: BLOCKED - gitleaks found a potential secret in the staged changes." >&2
+    echo "pre-commit: remove the secret from the file, unstage it (git restore --staged <file>)," >&2
+    echo "pre-commit: then commit again. Do not bypass this with --no-verify." >&2
+    exit 1
+fi

@@ -7,3 +7,5 @@ HELP.md
 mvnw
 mvnw.cmd
 target/
+.env
+reports/
