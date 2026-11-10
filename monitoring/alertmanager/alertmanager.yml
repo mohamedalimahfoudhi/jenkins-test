@@ -1,0 +1,14 @@
+# No paging system is configured in this project, so the default receiver is
+# intentionally silent: alerts are visible in Prometheus (/alerts) and in the
+# Alertmanager UI on port 9093. To actually deliver them, replace the receiver
+# below with a webhook (Slack, Teams, a ticketing system) and set the URL in
+# monitoring/.env; never commit a real webhook URL.
+route:
+  receiver: default
+  group_by: [alertname]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 4h
+
+receivers:
+  - name: default

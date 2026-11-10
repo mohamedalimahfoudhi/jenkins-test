@@ -21,7 +21,7 @@ import org.springframework.test.web.servlet.MockMvc;
  * validation and error-handling contract so a later change cannot silently
  * weaken it.
  */
-@SpringBootTest
+@SpringBootTest(properties = {"management.endpoints.web.exposure.include=health,prometheus"})
 @AutoConfigureMockMvc
 class SecurityBehaviorTests {
 
@@ -99,5 +99,41 @@ class SecurityBehaviorTests {
         mockMvc.perform(get("/nope"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error").value("Not Found"));
+    }
+
+    @Test
+    @DisplayName("health is exposed for the monitoring stack without details")
+    void healthEndpointIsExposedWithoutDetails() throws Exception {
+        String body = mockMvc.perform(get("/actuator/health"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("UP"))
+                .andReturn().getResponse().getContentAsString();
+
+        assertFalse(body.contains("components"), "health leaked component details: " + body);
+    }
+
+    // The scrape endpoint is asserted against a real running instance
+    // (scripts/security-smoke-test.sh, scripts/monitoring-check.sh), not here:
+    // in a MockMvc context the metrics-export auto-configuration stays disabled,
+    // so /actuator/prometheus is never registered and an assertion here would
+    // only be testing the harness.
+
+    @Test
+    @DisplayName("actuator endpoints that leak configuration stay closed")
+    void sensitiveActuatorEndpointsAreClosed() throws Exception {
+        // /actuator is the discovery page: it answers 200 by design, and the
+        // security property is that it only advertises the two safe endpoints.
+        String links = mockMvc.perform(get("/actuator"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        for (String forbidden : new String[] {"env", "beans", "heapdump", "threaddump", "loggers"}) {
+            assertFalse(links.contains("/" + forbidden),
+                    "actuator discovery advertises " + forbidden + ": " + links);
+        }
+
+        mockMvc.perform(get("/actuator/env")).andExpect(status().isNotFound());
+        mockMvc.perform(get("/actuator/beans")).andExpect(status().isNotFound());
+        mockMvc.perform(get("/actuator/heapdump")).andExpect(status().isNotFound());
     }
 }

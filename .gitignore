@@ -9,3 +9,6 @@ mvnw.cmd
 target/
 .env
 reports/
+
+# Phase 4: generated Grafana password
+monitoring/.env

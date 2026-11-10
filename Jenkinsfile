@@ -42,6 +42,9 @@ pipeline {
         booleanParam(name: 'PROD_DEPLOY',       defaultValue: false, description: 'Phase 3: deploy the production container with secrets injected from Jenkins credentials.')
         booleanParam(name: 'SECURITY_SMOKE',    defaultValue: true, description: 'Phase 3: post-deployment security smoke tests.')
         booleanParam(name: 'CONFIG_SAFETY',     defaultValue: true, description: 'Phase 3: configuration safety checks (ports, non-root user, runtime secrets).')
+        // Phase 4 (Operations). The stack needs roughly 1 GB of RAM, so it is off
+        // for ordinary builds and switched on for the demo.
+        booleanParam(name: 'MONITORING',        defaultValue: false, description: 'Phase 4: start Prometheus/Grafana/Alertmanager and verify metrics, dashboards and alerts.')
     }
 
     options {
@@ -426,6 +429,35 @@ pipeline {
             post {
                 always {
                     archiveArtifacts artifacts: 'reports/config-safety-report.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
+        // ---------------- Phase 4: Operations ----------------
+
+        stage('Operations: monitoring stack') {
+            when {
+                expression { params.MONITORING }
+            }
+            steps {
+                sh 'bash scripts/install-phase4.sh'
+            }
+        }
+
+        stage('Operations: metrics and alerts check') {
+            when {
+                expression { params.MONITORING }
+            }
+            steps {
+                sh '''
+                    set -o pipefail
+                    mkdir -p reports
+                    bash scripts/monitoring-check.sh | tee reports/monitoring-report.txt
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/monitoring-report.txt', allowEmptyArchive: true
                 }
             }
         }

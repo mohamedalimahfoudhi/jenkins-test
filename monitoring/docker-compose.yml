@@ -1,0 +1,86 @@
+# Phase 4 (Operations) monitoring stack.
+#
+# It joins the same Docker network the pipeline uses for the application, so
+# Prometheus scrapes the container by name (devsecops-app:8080) instead of
+# depending on how the host publishes ports.
+#
+# Start with: bash scripts/install-phase4.sh
+# Stop with : docker compose -f monitoring/docker-compose.yml down
+#
+# The images are pinned to explicit versions; the installer resolves and
+# records exactly which tag is in use.
+name: devsecops-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: devsecops-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [devsecops]
+    mem_limit: 512m
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: devsecops-alertmanager
+    restart: unless-stopped
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "9093:9093"
+    networks: [devsecops]
+    mem_limit: 128m
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: devsecops-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      # No password in git: install-phase4.sh generates monitoring/.env (0600).
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in monitoring/.env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on: [prometheus]
+    networks: [devsecops]
+    mem_limit: 256m
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: devsecops-node-exporter
+    restart: unless-stopped
+    # Read-only view of the VM: host metrics for memory and CPU alerts.
+    command: ["--path.rootfs=/host"]
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    ports:
+      - "9100:9100"
+    networks: [devsecops]
+    mem_limit: 64m
+
+networks:
+  devsecops:
+    external: true
+    name: devsecops-net
+
+volumes:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,59 @@
+groups:
+  - name: devsecops-app
+    rules:
+      - alert: ApplicationDown
+        expr: up{job="devsecops-app"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The application is not being scraped"
+          description: "Prometheus has failed to scrape {{ $labels.instance }} for 1 minute."
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_server_requests_seconds_count{job="devsecops-app",status=~"5.."}[5m]))
+            /
+          clamp_min(sum(rate(http_server_requests_seconds_count{job="devsecops-app"}[5m])), 0.001)
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5% of requests return 5xx"
+
+      - alert: SlowResponses
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_server_requests_seconds_bucket{job="devsecops-app"}[5m])) by (le)) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "95th percentile latency is above 1 second"
+
+      - alert: HighHeapUsage
+        expr: sum(jvm_memory_used_bytes{job="devsecops-app",area="heap"}) > 3.5e8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "JVM heap above 350 MB"
+
+  - name: host
+    rules:
+      - alert: NodeDown
+        expr: up{job="node"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "node_exporter on the VM is down"
+
+      - alert: HostMemoryHigh
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "VM memory usage above 90%"

@@ -9,7 +9,8 @@
 # Checks:
 #   1. the service answers and returns the expected greeting
 #   2. hardening headers are present
-#   3. management endpoints are NOT exposed (/actuator, /actuator/env)
+#   3. only /actuator/health and /actuator/prometheus are open; everything that
+#      leaks configuration (/actuator/env, /actuator/beans, ...) stays 404
 #   4. unknown routes return 404 (no stack trace, no index page)
 #   5. HTTP TRACE is refused
 #   6. no X-Powered-By style banner
@@ -55,13 +56,42 @@ for pair in "X-Content-Type-Options:nosniff" "X-Frame-Options:DENY" "Referrer-Po
     fi
 done
 
-# 3. management endpoints must be closed
-for path in /actuator /actuator/env /actuator/health; do
+# 3. health and the metrics endpoint are open by design (Phase 4 monitoring);
+#    anything that leaks configuration must still be closed.
+got="$(code GET /actuator/health)"
+[ "$got" = "200" ] && pass "/actuator/health is exposed (HTTP 200)" || fail "/actuator/health returned HTTP $got"
+
+if curl -s --max-time 10 "$BASE_URL/actuator/prometheus" | grep -q '^jvm_memory_used_bytes'; then
+    pass "/actuator/prometheus serves JVM metrics"
+else
+    fail "/actuator/prometheus does not serve JVM metrics"
+fi
+
+# /actuator itself is the discovery page: it answers 200 by design, and the
+# property to assert is that it advertises nothing that leaks configuration.
+links="$(curl -s --max-time 10 "$BASE_URL/actuator" || true)"
+if [ -z "$links" ]; then
+    fail "/actuator discovery page returned nothing"
+else
+    leaked=""
+    for bad in env beans heapdump threaddump loggers; do
+        if printf '%s' "$links" | grep -q "/$bad"; then
+            leaked="$leaked $bad"
+        fi
+    done
+    if [ -z "$leaked" ]; then
+        pass "/actuator discovery advertises only safe endpoints"
+    else
+        fail "/actuator discovery advertises:$leaked"
+    fi
+fi
+
+for path in /actuator/env /actuator/beans /actuator/heapdump; do
     got="$(code GET "$path")"
     if [ "$got" = "404" ]; then
-        pass "$path is not exposed (HTTP 404)"
+        pass "$path stays closed (HTTP 404)"
     else
-        fail "$path is exposed (HTTP $got) - do not expose management endpoints"
+        fail "$path is exposed (HTTP $got) - configuration leak"
     fi
 done
 
