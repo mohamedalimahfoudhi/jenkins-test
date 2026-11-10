@@ -38,6 +38,10 @@ pipeline {
         booleanParam(name: 'ACCEPTANCE_TESTS',  defaultValue: true, description: 'Phase 2: scripted security acceptance tests (status codes + headers).')
         booleanParam(name: 'INFRA_TEST',        defaultValue: true, description: 'Phase 2: infrastructure test of the VM.')
         booleanParam(name: 'COMPLIANCE_CHECK',  defaultValue: true, description: 'Phase 2: Dockerfile/Jenkinsfile compliance policy check.')
+        // Phase 3 (Production). PROD_DEPLOY needs the 'app-api-key' Jenkins credential.
+        booleanParam(name: 'PROD_DEPLOY',       defaultValue: false, description: 'Phase 3: deploy the production container with secrets injected from Jenkins credentials.')
+        booleanParam(name: 'SECURITY_SMOKE',    defaultValue: true, description: 'Phase 3: post-deployment security smoke tests.')
+        booleanParam(name: 'CONFIG_SAFETY',     defaultValue: true, description: 'Phase 3: configuration safety checks (ports, non-root user, runtime secrets).')
     }
 
     options {
@@ -347,6 +351,85 @@ pipeline {
             }
         }
 
+        // ---------------- Phase 3: Production ----------------
+
+        stage('Deploy production container') {
+            when {
+                expression { params.PROD_DEPLOY }
+            }
+            steps {
+                // The secret exists only for the duration of this block; it is written
+                // to a 0600 temp file for --env-file and deleted immediately after.
+                // Docker secrets need Swarm, and on a single host the docker socket is
+                // already root-equivalent, so this is the honest option here.
+                withCredentials([string(credentialsId: 'app-api-key', variable: 'APP_API_KEY')]) {
+                    sh '''
+                        set -eu
+                        umask 077
+                        ENVFILE="$(mktemp)"
+                        trap 'rm -f "$ENVFILE"' EXIT
+                        printf 'APP_API_KEY=%s\n' "$APP_API_KEY" > "$ENVFILE"
+                        docker network inspect devsecops-net >/dev/null 2>&1 || docker network create devsecops-net
+                        docker rm -f devsecops-prod >/dev/null 2>&1 || true
+                        docker run -d --name devsecops-prod --network devsecops-net \
+                            --env-file "$ENVFILE" -p 18081:8080 devsecops-demo:ci
+                        for i in $(seq 1 40); do
+                            if curl -fsS http://127.0.0.1:18081/hello >/dev/null 2>&1; then
+                                echo "production container ready after ${i}s on port 18081"
+                                exit 0
+                            fi
+                            sleep 1
+                        done
+                        docker logs devsecops-prod || true
+                        exit 1
+                    '''
+                }
+            }
+        }
+
+        stage('Security smoke tests') {
+            when {
+                expression { params.SECURITY_SMOKE }
+            }
+            steps {
+                sh '''
+                    set -o pipefail
+                    mkdir -p reports
+                    # Smoke the production container when it exists, otherwise the acceptance one.
+                    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx devsecops-prod; then
+                        SMOKE_URL=http://127.0.0.1:18081
+                    else
+                        SMOKE_URL=http://127.0.0.1:18080
+                    fi
+                    echo "smoke target: $SMOKE_URL"
+                    BASE_URL="$SMOKE_URL" bash scripts/security-smoke-test.sh | tee reports/smoke-report.txt
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/smoke-report.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Configuration safety check') {
+            when {
+                expression { params.CONFIG_SAFETY }
+            }
+            steps {
+                sh '''
+                    set -o pipefail
+                    mkdir -p reports
+                    CONTAINER=devsecops-prod bash scripts/config-safety-check.sh | tee reports/config-safety-report.txt
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/config-safety-report.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
         // Runs only when the build is started with RUN_SONAR checked.
         stage('SAST (SonarQube)') {
             when {
@@ -368,7 +451,7 @@ pipeline {
             // Phase 2 containers are disposable; remove them even when a stage failed.
             sh '''
                 if command -v docker >/dev/null 2>&1; then
-                    docker rm -f devsecops-app >/dev/null 2>&1 || true
+                    docker rm -f devsecops-app devsecops-prod >/dev/null 2>&1 || true
                     docker network rm devsecops-net >/dev/null 2>&1 || true
                 fi
             '''
