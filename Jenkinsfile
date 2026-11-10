@@ -130,6 +130,7 @@ pipeline {
                 // VERIFY: odcInstallation must match the tool name configured
                 // in Global Tool Configuration.
                 dependencyCheck odcInstallation: 'dependency-check',
+                        nvdCredentialsId: 'nvd-api-key',
                         additionalArguments: '--format XML --format HTML'
             }
             post {
