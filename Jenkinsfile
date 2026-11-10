@@ -48,6 +48,42 @@ pipeline {
             }
         }
 
+        // Fails fast, with one clear message, when a tool the later security
+        // stages need is missing - instead of dying inside that security stage.
+        stage('Preflight (tool checks)') {
+            steps {
+                sh '''
+                    set -u
+                    FAILED=0
+
+                    check() {
+                        label="$1"; shift
+                        if output="$("$@" 2>&1)"; then
+                            printf 'OK    %-24s %s\n' "$label" "$(printf '%s' "$output" | head -n 1)"
+                        else
+                            printf 'FAIL  %-24s command not found or failed: %s\n' "$label" "$*"
+                            FAILED=1
+                        fi
+                    }
+
+                    check "jdk (tool jdk21)"   java -version
+                    check "maven (tool maven)" mvn -v
+                    check "gitleaks"           gitleaks version
+                    check "hadolint"           hadolint --version
+
+                    if [ "$FAILED" -ne 0 ]; then
+                        echo "--------------------------------------------------------------"
+                        echo "Preflight failed, so no security stage ran and no report exists."
+                        echo "Fix: install the missing binary in the VM (docs/development-setup.md,"
+                        echo "section 2), then check the names under Manage Jenkins > Global Tool"
+                        echo "Configuration (jdk21, maven, dependency-check)."
+                        exit 1
+                    fi
+                    echo "Preflight passed: every tool the security stages need is on PATH."
+                '''
+            }
+        }
+
         stage('Build') {
             steps {
                 sh 'mvn -B -ntp clean compile'
