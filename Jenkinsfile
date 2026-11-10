@@ -1,15 +1,30 @@
-// DevSecOps pipeline - Phase 1: Development
-// Extends the original pipeline (checkout + "Show date") with build, test,
-// secrets, dependency, Dockerfile and SAST stages.
+// DevSecOps pipeline - consolidated, phases 1 to 4.
+//
+// One pipeline covers the whole course project:
+//   Phase 1 Development  build, unit tests, secrets scan, dependency scan,
+//                        Dockerfile lint
+//   Phase 2 Acceptance   image build + scan, container deploy, DAST, security
+//                        acceptance tests, infrastructure test, compliance
+//   Phase 3 Production   production deploy with an injected secret, security
+//                        smoke test, configuration safety check
+//   Phase 4 Operations   metrics, dashboards and alerting
+//
+// Stage-by-stage reference, parameters and failure playbook: docs/pipeline-overview.md
+// Tool inventory and pinned versions:                        docs/tools-table.md
 //
 // Prerequisites in Jenkins:
 //   Manage Jenkins > Global Tool Configuration:
 //     JDK              name: jdk21
 //     Maven            name: maven
-//     Dependency-Check name: dependency-check   (Install automatically)
-//   VM binaries on PATH: gitleaks, hadolint (see docs/development-setup.md)
-//   Plugins: OWASP Dependency-Check, SonarQube Scanner, JUnit,
-//            HTML Publisher, Timestamper.
+//     Dependency-Check name: dependency-check
+//   Manage Jenkins > Credentials:
+//     nvd-api-key  (secret text) - NVD API key for Dependency-Check
+//     app-api-key  (secret text) - runtime secret for the production container
+//   Manage Jenkins > Plugins:
+//     OWASP Dependency-Check, SonarQube Scanner, JUnit, HTML Publisher,
+//     Timestamper, Credentials Binding
+//   VM binaries on PATH: gitleaks, hadolint, trivy, docker
+//   (see docs/development-setup.md for the install scripts)
 //
 // Steps marked VERIFY should be confirmed once in
 // Dashboard > <job> > Pipeline Syntax > Snippet Generator, because parameter
@@ -23,27 +38,32 @@ pipeline {
         maven 'maven'
     }
 
+    // Every heavy or risky stage is a switch. Defaults are chosen so that an
+    // ordinary build is safe to run on a 4 GB VM: SonarQube, the production
+    // deploy and the monitoring stack are off until asked for.
     parameters {
+        // ---- Phase 1 ----
         booleanParam(
             name: 'RUN_SONAR',
             defaultValue: false,
-            description: 'Run the SonarQube SAST stage and wait for its quality gate. Needs a SonarQube server named "SonarQube" under Manage Jenkins > System.'
+            description: 'SAST: run the SonarQube analysis and wait for its quality gate. Needs a SonarQube server named "SonarQube" under Manage Jenkins > System, and roughly 2 GB of free RAM.'
         )
-        // Phase 2 (Acceptance). Heavy stages default to on but can be switched
-        // off individually; see docs/phase2-ordering for the memory reasoning.
-        booleanParam(name: 'BUILD_IMAGE',       defaultValue: true, description: 'Phase 2: build the Docker image.')
-        booleanParam(name: 'TRIVY_SCAN',        defaultValue: true, description: 'Phase 2: scan the image with Trivy, fail on CRITICAL.')
-        booleanParam(name: 'DEPLOY_CONTAINER',  defaultValue: true, description: 'Phase 2: run the app container on a Docker network (host port 18080).')
-        booleanParam(name: 'ZAP_SCAN',          defaultValue: true, description: 'Phase 2: OWASP ZAP baseline DAST against the running container.')
-        booleanParam(name: 'ACCEPTANCE_TESTS',  defaultValue: true, description: 'Phase 2: scripted security acceptance tests (status codes + headers).')
-        booleanParam(name: 'INFRA_TEST',        defaultValue: true, description: 'Phase 2: infrastructure test of the VM.')
-        booleanParam(name: 'COMPLIANCE_CHECK',  defaultValue: true, description: 'Phase 2: Dockerfile/Jenkinsfile compliance policy check.')
-        // Phase 3 (Production). PROD_DEPLOY needs the 'app-api-key' Jenkins credential.
+
+        // ---- Phase 2 (Acceptance) ----
+        booleanParam(name: 'BUILD_IMAGE',       defaultValue: true,  description: 'Phase 2: build the Docker image.')
+        booleanParam(name: 'TRIVY_SCAN',        defaultValue: true,  description: 'Phase 2: scan the image with Trivy, fail on CRITICAL.')
+        booleanParam(name: 'DEPLOY_CONTAINER',  defaultValue: true,  description: 'Phase 2: run the app container on a Docker network (host port 18080).')
+        booleanParam(name: 'ZAP_SCAN',          defaultValue: true,  description: 'Phase 2: OWASP ZAP baseline DAST against the running container.')
+        booleanParam(name: 'ACCEPTANCE_TESTS',  defaultValue: true,  description: 'Phase 2: scripted security acceptance tests (status codes + headers).')
+        booleanParam(name: 'INFRA_TEST',        defaultValue: true,  description: 'Phase 2: infrastructure test of the VM.')
+        booleanParam(name: 'COMPLIANCE_CHECK',  defaultValue: true,  description: 'Phase 2: Dockerfile/Jenkinsfile compliance policy check.')
+
+        // ---- Phase 3 (Production) ----
         booleanParam(name: 'PROD_DEPLOY',       defaultValue: false, description: 'Phase 3: deploy the production container with secrets injected from Jenkins credentials.')
-        booleanParam(name: 'SECURITY_SMOKE',    defaultValue: true, description: 'Phase 3: post-deployment security smoke tests.')
-        booleanParam(name: 'CONFIG_SAFETY',     defaultValue: true, description: 'Phase 3: configuration safety checks (ports, non-root user, runtime secrets).')
-        // Phase 4 (Operations). The stack needs roughly 1 GB of RAM, so it is off
-        // for ordinary builds and switched on for the demo.
+        booleanParam(name: 'SECURITY_SMOKE',    defaultValue: true,  description: 'Phase 3: post-deployment security smoke tests.')
+        booleanParam(name: 'CONFIG_SAFETY',     defaultValue: true,  description: 'Phase 3: configuration safety checks (ports, non-root user, runtime secrets).')
+
+        // ---- Phase 4 (Operations) ----
         booleanParam(name: 'MONITORING',        defaultValue: false, description: 'Phase 4: start Prometheus/Grafana/Alertmanager and verify metrics, dashboards and alerts.')
     }
 
@@ -55,6 +75,8 @@ pipeline {
     }
 
     stages {
+
+        // ===================== Phase 1: Development =====================
 
         // Same first stage as the original pipeline.
         stage('Checkout') {
@@ -188,10 +210,11 @@ pipeline {
             }
         }
 
-        // ---------------- Phase 2: Acceptance ----------------
+        // ===================== Phase 2: Acceptance =====================
         // Order matters on a 4 GB VM: build -> scan image -> deploy -> DAST ->
         // acceptance -> cleanup. SonarQube (last) and ZAP are the two memory
         // hogs; keep RUN_SONAR off and ZAP_SCAN off when you need a fast build.
+        // Reasoning and the memory budget: docs/pipeline-overview.md.
 
         stage('Container image (build)') {
             when {
@@ -354,7 +377,7 @@ pipeline {
             }
         }
 
-        // ---------------- Phase 3: Production ----------------
+        // ===================== Phase 3: Production =====================
 
         stage('Deploy production container') {
             when {
@@ -433,7 +456,7 @@ pipeline {
             }
         }
 
-        // ---------------- Phase 4: Operations ----------------
+        // ===================== Phase 4: Operations =====================
 
         stage('Operations: monitoring stack') {
             when {
@@ -462,7 +485,10 @@ pipeline {
             }
         }
 
-        // Runs only when the build is started with RUN_SONAR checked.
+        // ===================== Optional SAST, last on purpose =====================
+        // Listed after the operations stages so the two memory-hungry things
+        // (SonarQube server + its scanner, ZAP) never run at the same moment.
+
         stage('SAST (SonarQube)') {
             when {
                 expression { params.RUN_SONAR }
@@ -480,20 +506,30 @@ pipeline {
 
     post {
         always {
-            // Phase 2 containers are disposable; remove them even when a stage failed.
+            // The application containers are disposable: remove them even when a
+            // stage failed, so the next build starts clean and the smoke tests can
+            // never talk to a stale container.
             sh '''
                 if command -v docker >/dev/null 2>&1; then
                     docker rm -f devsecops-app devsecops-prod >/dev/null 2>&1 || true
-                    docker network rm devsecops-net >/dev/null 2>&1 || true
+                    # Keep the network while the monitoring stack is attached to it:
+                    # Prometheus scrapes the app by name through it, and removing it
+                    # would break the stack the operations stages just verified.
+                    if [ -n "$(docker ps --filter network=devsecops-net --format '{{.Names}}' 2>/dev/null)" ]; then
+                        echo "keeping devsecops-net: containers are still attached"
+                        docker ps --filter network=devsecops-net --format '  attached: {{.Names}}'
+                    else
+                        docker network rm devsecops-net >/dev/null 2>&1 || true
+                    fi
                 fi
             '''
             archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
         }
         success {
-            echo 'Phase 1 pipeline finished: build, tests, secrets, dependencies, Dockerfile and (optionally) SAST.'
+            echo 'Pipeline finished: build, tests, secrets, dependencies, Dockerfile lint, image scan, DAST, acceptance, production checks and (when enabled) operations.'
         }
         failure {
-            echo 'Phase 1 pipeline failed - see the first failing stage above.'
+            echo 'Pipeline failed - the first red stage above is the one to read. Reports from the stages that did run are archived under the build artifacts.'
         }
     }
 }
