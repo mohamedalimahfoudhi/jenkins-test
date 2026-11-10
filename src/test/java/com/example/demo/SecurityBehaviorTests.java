@@ -92,4 +92,12 @@ class SecurityBehaviorTests {
         assertFalse(body.contains("com.example.demo"), "package/class names leaked: " + body);
         assertFalse(body.contains("internal detail"), "internal message leaked: " + body);
     }
+
+    @Test
+    @DisplayName("an unknown route returns 404, not 500")
+    void unknownRouteReturns404() throws Exception {
+        mockMvc.perform(get("/nope"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("Not Found"));
+    }
 }

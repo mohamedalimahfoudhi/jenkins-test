@@ -29,6 +29,15 @@ pipeline {
             defaultValue: false,
             description: 'Run the SonarQube SAST stage and wait for its quality gate. Needs a SonarQube server named "SonarQube" under Manage Jenkins > System.'
         )
+        // Phase 2 (Acceptance). Heavy stages default to on but can be switched
+        // off individually; see docs/phase2-ordering for the memory reasoning.
+        booleanParam(name: 'BUILD_IMAGE',       defaultValue: true, description: 'Phase 2: build the Docker image.')
+        booleanParam(name: 'TRIVY_SCAN',        defaultValue: true, description: 'Phase 2: scan the image with Trivy, fail on CRITICAL.')
+        booleanParam(name: 'DEPLOY_CONTAINER',  defaultValue: true, description: 'Phase 2: run the app container on a Docker network (host port 18080).')
+        booleanParam(name: 'ZAP_SCAN',          defaultValue: true, description: 'Phase 2: OWASP ZAP baseline DAST against the running container.')
+        booleanParam(name: 'ACCEPTANCE_TESTS',  defaultValue: true, description: 'Phase 2: scripted security acceptance tests (status codes + headers).')
+        booleanParam(name: 'INFRA_TEST',        defaultValue: true, description: 'Phase 2: infrastructure test of the VM.')
+        booleanParam(name: 'COMPLIANCE_CHECK',  defaultValue: true, description: 'Phase 2: Dockerfile/Jenkinsfile compliance policy check.')
     }
 
     options {
@@ -172,6 +181,172 @@ pipeline {
             }
         }
 
+        // ---------------- Phase 2: Acceptance ----------------
+        // Order matters on a 4 GB VM: build -> scan image -> deploy -> DAST ->
+        // acceptance -> cleanup. SonarQube (last) and ZAP are the two memory
+        // hogs; keep RUN_SONAR off and ZAP_SCAN off when you need a fast build.
+
+        stage('Container image (build)') {
+            when {
+                expression { params.BUILD_IMAGE }
+            }
+            steps {
+                sh '''
+                    set -eu
+                    mkdir -p reports
+                    docker build -t devsecops-demo:ci .
+                    docker image inspect devsecops-demo:ci --format '{{.Id}}' > reports/image-id.txt
+                    echo "built devsecops-demo:ci ($(cat reports/image-id.txt))"
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/image-id.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Container scan (Trivy)') {
+            when {
+                expression { params.TRIVY_SCAN }
+            }
+            steps {
+                sh '''
+                    set -eu
+                    mkdir -p reports
+                    trivy --version
+                    # Fail the build only on CRITICAL findings; everything is still reported.
+                    set +e
+                    trivy image --severity CRITICAL --exit-code 1 \
+                        --format table -o reports/trivy-report.txt devsecops-demo:ci
+                    TRIVY_EXIT=$?
+                    set -e
+                    trivy image --severity CRITICAL --format json \
+                        -o reports/trivy-report.json devsecops-demo:ci >/dev/null 2>&1 || true
+                    cat reports/trivy-report.txt || true
+                    exit "$TRIVY_EXIT"
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/trivy-report.*', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Deploy application container') {
+            when {
+                expression { params.DEPLOY_CONTAINER }
+            }
+            steps {
+                sh '''
+                    set -eu
+                    docker network inspect devsecops-net >/dev/null 2>&1 || docker network create devsecops-net
+                    docker rm -f devsecops-app >/dev/null 2>&1 || true
+                    # 8080 on the VM belongs to Jenkins, so the app is published on 18080.
+                    docker run -d --name devsecops-app --network devsecops-net \
+                        -p 18080:8080 devsecops-demo:ci
+                    for i in $(seq 1 40); do
+                        if curl -fsS http://127.0.0.1:18080/hello >/dev/null 2>&1; then
+                            echo "app ready after ${i}s on http://127.0.0.1:18080"
+                            exit 0
+                        fi
+                        sleep 1
+                    done
+                    echo "app did not become ready in 40s"
+                    docker logs devsecops-app || true
+                    exit 1
+                '''
+            }
+        }
+
+        stage('DAST (OWASP ZAP baseline)') {
+            when {
+                expression { params.ZAP_SCAN }
+            }
+            steps {
+                sh '''
+                    set -eu
+                    mkdir -p reports
+                    # ZAP writes into /zap/wrk as its own user; make the mount writable for it.
+                    chmod a+w reports
+                    docker run --rm --network devsecops-net \
+                        -v "$(pwd)/reports:/zap/wrk/:rw" \
+                        zaproxy/zap-stable:2.17.0 \
+                        zap-baseline.py -t http://devsecops-app:8080/hello \
+                            -r zap-report.html -J zap-report.json -I
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/zap-report.*', allowEmptyArchive: true
+                    publishHTML(target: [
+                        allowMissing         : true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll              : true,
+                        reportDir            : 'reports',
+                        reportFiles          : 'zap-report.html',
+                        reportName           : 'OWASP ZAP baseline report'
+                    ])
+                }
+            }
+        }
+
+        stage('Security acceptance tests') {
+            when {
+                expression { params.ACCEPTANCE_TESTS }
+            }
+            steps {
+                sh '''
+                    set -o pipefail
+                    mkdir -p reports
+                    BASE_URL=http://127.0.0.1:18080 bash scripts/security-acceptance-test.sh \
+                        | tee reports/acceptance-report.txt
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/acceptance-report.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Infrastructure test (VM)') {
+            when {
+                expression { params.INFRA_TEST }
+            }
+            steps {
+                sh '''
+                    set -o pipefail
+                    mkdir -p reports
+                    bash scripts/infra-check.sh | tee reports/infra-report.txt
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/infra-report.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Compliance check (policy)') {
+            when {
+                expression { params.COMPLIANCE_CHECK }
+            }
+            steps {
+                sh '''
+                    set -o pipefail
+                    mkdir -p reports
+                    bash scripts/compliance-check.sh | tee reports/compliance-report.txt
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/compliance-report.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
         // Runs only when the build is started with RUN_SONAR checked.
         stage('SAST (SonarQube)') {
             when {
@@ -190,6 +365,13 @@ pipeline {
 
     post {
         always {
+            // Phase 2 containers are disposable; remove them even when a stage failed.
+            sh '''
+                if command -v docker >/dev/null 2>&1; then
+                    docker rm -f devsecops-app >/dev/null 2>&1 || true
+                    docker network rm devsecops-net >/dev/null 2>&1 || true
+                fi
+            '''
             archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
         }
         success {
