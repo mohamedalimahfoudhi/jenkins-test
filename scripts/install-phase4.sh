@@ -78,8 +78,8 @@ docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" up -d
 
 # 6. Wait for readiness - a started container is not a working service.
 wait_for() {
-    local url="$1" name="$2" i
-    for i in $(seq 1 60); do
+    local url="$1" name="$2"
+    for _ in $(seq 1 60); do
         if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
             log "$name is ready"
             return 0

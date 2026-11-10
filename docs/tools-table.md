@@ -14,9 +14,10 @@ number comes from.
 | Jenkins | **2.580.2** | all | Orchestrator | Vagrant VM, port 8080 | — |
 | OpenJDK (JDK) | **21** | 1, 2 | Build and test toolchain; project targets Java 17 | VM package / Jenkins tool `jdk21` | Compile or test error |
 | Apache Maven | **3.6.3** | 1, 2 | Build, test, SonarQube goal | VM package / Jenkins tool `maven` | Build fails |
-| Spring Boot | **3.3.5** | 1 | Application framework (parent POM) | `pom.xml` | — |
-| JUnit 5 | managed by Boot 3.3.5 | 1 | Unit and security-behaviour tests (10 tests) | `spring-boot-starter-test` | Any test fails |
-| Micrometer Prometheus registry | managed by Boot 3.3.5 | 4 | Exposes `/actuator/prometheus` | `pom.xml` | — |
+| Spring Boot | **4.1.2** | 1 | Application framework (parent POM); brings spring-framework 7.0.10 and tomcat 11.0.27 | `pom.xml` | — |
+| JUnit 5 | managed by Boot 4.1.2 | 1 | Unit and security-behaviour tests (10 tests) | `spring-boot-starter-test` | Any test fails |
+| Spring Boot webmvc test support | managed by Boot 4.1.2 | 1 | `@AutoConfigureMockMvc`: Boot 4 moved it out of `starter-test` into its own module | `spring-boot-starter-webmvc-test` | Compilation of the tests |
+| Micrometer Prometheus registry | managed by Boot 4.1.2 | 4 | Exposes `/actuator/prometheus` | `pom.xml` | — |
 | gitleaks | **8.30.1** | 1 | Secrets scan over the whole git history | `scripts/install-tools.sh` → `/usr/local/bin`, **sha256 verified** against the project's `checksums.txt` | Any finding |
 | OWASP Dependency-Check | **13.0.0** | 1 | Software composition analysis (known CVEs in dependencies) | `scripts/install-dependency-check.sh` → `/opt/dependency-check`, **sha256 pinned** in the script | Any CVSS ≥ 9.0 |
 | hadolint | **2.15.1** | 1 | Dockerfile lint | `scripts/install-tools.sh` → `/usr/local/bin`, **sha256 verified** against `checksums.sha256` | Any lint finding |
@@ -95,6 +96,11 @@ container). Neither value appears in the repository or in the Jenkinsfile.
    there.
 5. **No tool here is a substitute for a real CD setup:** the image is never
    pushed to a registry, and "production" is a second container on the same VM.
+6. **The framework version was raised because the scan demanded it.** Trivy found
+   9 CRITICAL vulnerabilities in Spring Boot 3.3.5 (Tomcat 10.1.31 and spring-webmvc
+   6.1.14); the parent was moved to 4.1.2 and the same scan now reports no
+   vulnerabilities. The gate was not relaxed — the dependency was fixed
+   (`docs/verification-here.md` §2).
 
 ---
 

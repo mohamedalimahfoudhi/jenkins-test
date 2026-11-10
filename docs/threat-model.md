@@ -8,7 +8,7 @@ project, not a production service.
 
 | Item | Value |
 |---|---|
-| Application | Spring Boot 3.3.5 web app, packaged as a jar, containerised in Phase 2 |
+| Application | Spring Boot 4.1.2 web app, packaged as a jar, containerised in Phase 2 |
 | Interfaces | `GET /hello` (public greeting), `POST /api/items` (JSON body, validated) |
 | Runtime | Java 21, embedded Tomcat on port 8080 |
 | Build path | Git repository → Jenkins `pipeline-git` → jar |

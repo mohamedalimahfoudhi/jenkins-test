@@ -1,6 +1,6 @@
 # Rapport final — Projet DevSecOps
 
-**Application** : API REST Spring Boot (`devops-demo`, Spring Boot 3.3.5, Java 17)
+**Application** : API REST Spring Boot (`devops-demo`, Spring Boot 4.1.2, Java 17)
 **Branche de référence** : `devsecops-final`
 **Environnement** : VM Vagrant Ubuntu 22.04, 4 Go de RAM, Jenkins 2.580.2 (`http://192.168.33.10:8080`)
 
@@ -78,6 +78,9 @@ menaces retenues et de leur traitement :
   se contourne avec `--no-verify`.
 * **Dockerfile** : image de base épinglée, utilisateur non-root, aucune dépendance de
   build dans l'image finale, `hadolint` sans avertissement.
+* **Dépendances maintenues** : Spring Boot 4.1.2 (spring-framework 7.0.10, Tomcat 11.0.27).
+  Ce n'était pas le choix initial : le scan Trivy a détecté 9 CVE critiques dans la version
+  3.3.5 et la porte du pipeline a imposé la mise à jour (§6, difficulté 11).
 * **Pipeline** : *Build* → *Unit and security tests* (10 tests) → *Secrets scan* →
   *Dependency scan* → *Dockerfile lint*.
 
@@ -344,6 +347,7 @@ problème ci-dessous a été rencontré, diagnostiqué et corrigé.
 | 8 | Échec intermittent du smoke test alors que l'application servait les métriques | `curl … \| grep -q` : `grep` ferme le tube au premier résultat, `curl` meurt de SIGPIPE (141) et `pipefail` transforme un succès en échec | corps de réponse capturé **avant** le filtrage (5 exécutions consécutives stables) |
 | 9 | Le `post` supprimait le réseau Docker utilisé par la pile d'observation | `docker network rm` cassait la cible Prometheus | le réseau n'est supprimé que si aucun conteneur n'y est attaché |
 | 10 | 4 Go de RAM insuffisants pour tout | Jenkins + ZAP + SonarQube + pile dépassent la RAM | SonarQube optionnel et **en dernier**, ZAP en baseline, limites mémoire sur les conteneurs, OSSEC écarté au profit de fail2ban |
+| 11 | **9 vulnérabilités critiques** dans nos propres dépendances | Trivy remonte 7 CVE Tomcat (10.1.31) et 1 CVE `spring-webmvc` 6.1.14, corrigées en 10.1.55+/7.0.9 ; Boot 3.3.5 est hors support | montée en **Spring Boot 4.1.2** (Spring 7.0.10, Tomcat 11.0.27) ; `@AutoConfigureMockMvc` déplacé dans un module dédié ; re-scan : **aucune vulnérabilité** |
 
 ---
 
@@ -461,3 +465,9 @@ bash scripts/infra-check.sh
 Tous les rapports sont archivés par build sous `reports/` (voir §7) et consultables dans
 Jenkins (artefacts + vues JUnit, HTML Publisher). Les captures attendues et la commande qui
 les produit sont listées dans [`docs/captures/README.md`](captures/README.md).
+
+Les contrôles qui ont pu être exécutés hors VM (build, 10 tests, gitleaks, hadolint,
+shellcheck, trivy, validation Compose/YAML/JSON, smoke 13/13, acceptance 11/11,
+monitoring 14/14, compliance 9/9, tests négatifs) sont consignés avec leurs résultats dans
+[`docs/verification-here.md`](verification-here.md), qui précise aussi ce qui ne peut être
+prouvé que sur la VM.
