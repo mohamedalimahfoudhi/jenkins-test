@@ -61,7 +61,11 @@ done
 got="$(code GET /actuator/health)"
 [ "$got" = "200" ] && pass "/actuator/health is exposed (HTTP 200)" || fail "/actuator/health returned HTTP $got"
 
-if curl -s --max-time 10 "$BASE_URL/actuator/prometheus" | grep -q '^jvm_memory_used_bytes'; then
+# Body captured before matching on purpose: `curl | grep -q` lets grep close the
+# pipe on its first match, so curl can die of SIGPIPE (141) and `pipefail` would
+# turn a passing check into an intermittent FAIL.
+metrics="$(curl -s --max-time 10 "$BASE_URL/actuator/prometheus" || true)"
+if grep -q '^jvm_memory_used_bytes' <<<"$metrics"; then
     pass "/actuator/prometheus serves JVM metrics"
 else
     fail "/actuator/prometheus does not serve JVM metrics"

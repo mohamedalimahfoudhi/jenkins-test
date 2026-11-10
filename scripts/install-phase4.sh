@@ -12,9 +12,14 @@
 # during the defence. Stop it with:
 #   docker compose -f monitoring/docker-compose.yml down
 #
+# Exposure: only Grafana is published outside the VM, so ufw gets exactly one
+# rule (3000/tcp). Prometheus (9090), Alertmanager (9093) and node_exporter
+# (9100) are bound to 127.0.0.1 by the compose file: reachable from the VM and
+# from the docker network, never from the outside.
+#
 # Usage:
 #   bash scripts/install-phase4.sh
-#   UI_PORTS="3000 9090" bash scripts/install-phase4.sh   # limit opened ports
+#   UI_PORTS="3000" bash scripts/install-phase4.sh        # limit opened ports
 #
 # The Grafana admin password lands in monitoring/.env (chmod 600, gitignored).
 # It is never printed and never committed.
@@ -26,7 +31,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$ROOT/monitoring/docker-compose.yml"
 ENV_FILE="$ROOT/monitoring/.env"
 NETWORK="${NETWORK:-devsecops-net}"
-UI_PORTS="${UI_PORTS:-3000 9090 9093 9100}"
+UI_PORTS="${UI_PORTS:-3000}"
 
 log() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -99,8 +104,9 @@ log ""
 docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" ps
 log ""
 log "Grafana     : http://<vm-ip>:3000    (user admin, password in monitoring/.env)"
-log "Prometheus  : http://<vm-ip>:9090    (targets: Status > Targets)"
-log "Alertmanager: http://<vm-ip>:9093    (alerts appear here when rules fire)"
-log "node_exporter metrics: http://<vm-ip>:9100/metrics"
+log "Prometheus  : http://127.0.0.1:9090  (inside the VM only, targets: Status > Targets)"
+log "Alertmanager: http://127.0.0.1:9093  (inside the VM only, alerts appear when rules fire)"
+log "node_exporter: http://127.0.0.1:9100 (inside the VM only)"
+log "Only Grafana is published outside the VM; ufw needs nothing else open."
 log ""
 log "Dashboard 'DevSecOps - Application and host' is provisioned in the DevSecOps folder."
