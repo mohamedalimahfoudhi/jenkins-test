@@ -104,37 +104,82 @@ pipeline {
         // stages need is missing - instead of dying inside that security stage.
         stage('Preflight (tool checks)') {
             steps {
-                sh '''
-                    set -u
-                    FAILED=0
+                // The parameters are handed to the shell as environment variables so
+                // the script stays a plain single-quoted string (Groovy would otherwise
+                // interpolate the shell's own $variables), while the checks can still
+                // depend on what this particular build will actually run.
+                withEnv([
+                    "RUN_DEPENDENCY_CHECK=${params.RUN_DEPENDENCY_CHECK}",
+                    "RUN_TRIVY_FS=${params.RUN_TRIVY_FS}",
+                    "TRIVY_SCAN=${params.TRIVY_SCAN}",
+                    "NEEDS_DOCKER=${params.BUILD_IMAGE || params.TRIVY_SCAN || params.DEPLOY_CONTAINER || params.ZAP_SCAN || params.PROD_DEPLOY || params.CONFIG_SAFETY || params.SECURITY_SMOKE || params.MONITORING}"
+                ]) {
+                    sh '''
+                        set -u
+                        FAILED=0
+                        DC_HOME="${DC_HOME:-/opt/dependency-check}"
 
-                    check() {
-                        label="$1"; shift
-                        if output="$("$@" 2>&1)"; then
-                            printf 'OK    %-24s %s\n' "$label" "$(printf '%s' "$output" | head -n 1)"
+                        check() {
+                            label="$1"; shift
+                            if output="$("$@" 2>&1)"; then
+                                printf 'OK    %-24s %s\n' "$label" "$(printf '%s' "$output" | head -n 1)"
+                            else
+                                printf 'FAIL  %-24s command not found or failed: %s\n' "$label" "$*"
+                                FAILED=1
+                            fi
+                        }
+
+                        check_path() {
+                            if [ -x "$2" ]; then
+                                printf 'OK    %-24s %s\n' "$1" "$2"
+                            else
+                                printf 'FAIL  %-24s not executable: %s\n' "$1" "$2"
+                                FAILED=1
+                            fi
+                        }
+
+                        # Needed by every build.
+                        check "jdk (tool jdk21)"   java -version
+                        check "maven (tool maven)" mvn -v
+                        check "gitleaks"           gitleaks version
+                        check "hadolint"           hadolint --version
+
+                        # Needed only by the stages THIS build runs. A tool the build
+                        # does not use must not stop it: with RUN_DEPENDENCY_CHECK off
+                        # the NVD-backed CLI is not required at all.
+                        if [ "$RUN_TRIVY_FS" = "true" ] || [ "$TRIVY_SCAN" = "true" ]; then
+                            check "trivy"              trivy --version
                         else
-                            printf 'FAIL  %-24s command not found or failed: %s\n' "$label" "$*"
-                            FAILED=1
+                            echo "SKIP  trivy                    both Trivy stages are off in this build"
                         fi
-                    }
+                        if [ "$RUN_TRIVY_FS" = "true" ]; then
+                            check "python3"            python3 --version
+                        fi
+                        if [ "$NEEDS_DOCKER" = "true" ]; then
+                            check "docker (daemon)"    docker info
+                        else
+                            echo "SKIP  docker                  no stage in this build uses Docker"
+                        fi
+                        if [ "$RUN_DEPENDENCY_CHECK" = "true" ]; then
+                            check_path "dependency-check CLI" "$DC_HOME/bin/dependency-check.sh"
+                        else
+                            echo "SKIP  dependency-check CLI    RUN_DEPENDENCY_CHECK is off (the Trivy scan still runs)"
+                        fi
 
-                    check "jdk (tool jdk21)"   java -version
-                    check "maven (tool maven)" mvn -v
-                    check "gitleaks"           gitleaks version
-                    check "hadolint"           hadolint --version
-                    check "trivy"              trivy --version
-                    check "python3"            python3 --version
-
-                    if [ "$FAILED" -ne 0 ]; then
-                        echo "--------------------------------------------------------------"
-                        echo "Preflight failed, so no security stage ran and no report exists."
-                        echo "Fix: install the missing binary in the VM (docs/development-setup.md,"
-                        echo "section 2), then check the names under Manage Jenkins > Global Tool"
-                        echo "Configuration (jdk21, maven, dependency-check)."
-                        exit 1
-                    fi
-                    echo "Preflight passed: every tool the security stages need is on PATH."
-                '''
+                        if [ "$FAILED" -ne 0 ]; then
+                            echo "--------------------------------------------------------------"
+                            echo "Preflight failed, so no security stage ran and no report exists."
+                            echo "Fix on the VM, then rebuild:"
+                            echo "  gitleaks, hadolint    : sudo bash scripts/install-tools.sh"
+                            echo "  trivy, docker, images : sudo bash scripts/install-phase2.sh"
+                            echo "  dependency-check CLI  : sudo bash scripts/install-dependency-check.sh"
+                            echo "  docker group          : sudo usermod -aG docker jenkins && sudo systemctl restart jenkins"
+                            echo "Tool names must stay jdk21 and maven in Manage Jenkins > Global Tool Configuration."
+                            exit 1
+                        fi
+                        echo "Preflight passed: every tool this build needs is usable."
+                    '''
+                }
             }
         }
 
@@ -475,11 +520,17 @@ pipeline {
                 expression { params.INFRA_TEST }
             }
             steps {
-                sh '''
-                    set -o pipefail
-                    mkdir -p reports
-                    bash scripts/infra-check.sh | tee reports/infra-report.txt
-                '''
+                // The infrastructure test asserts the Dependency-Check CLI only when
+                // this build actually runs that stage; otherwise it reports it as
+                // information instead of failing the build for an unused tool.
+                withEnv(["RUN_DEPENDENCY_CHECK=${params.RUN_DEPENDENCY_CHECK}"]) {
+                    sh '''
+                        set -o pipefail
+                        mkdir -p reports
+                        REQUIRE_DEPENDENCY_CHECK="${RUN_DEPENDENCY_CHECK:-1}" \
+                            bash scripts/infra-check.sh | tee reports/infra-report.txt
+                    '''
+                }
             }
             post {
                 always {

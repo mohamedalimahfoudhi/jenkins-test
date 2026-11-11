@@ -15,11 +15,16 @@
 # Usage:
 #   bash scripts/infra-check.sh
 #   MIN_DISK_GB=5 MIN_RAM_MB=3500 bash scripts/infra-check.sh
+#   REQUIRE_DEPENDENCY_CHECK=0 bash scripts/infra-check.sh   # when that stage is disabled
 
 set -uo pipefail
 
 MIN_DISK_GB="${MIN_DISK_GB:-3}"
 MIN_RAM_MB="${MIN_RAM_MB:-3000}"
+# The Dependency-Check CLI is required only when the pipeline runs its stage.
+# The pipeline passes the RUN_DEPENDENCY_CHECK parameter through; a manual run
+# defaults to requiring it, so nothing is quietly skipped.
+REQUIRE_DEPENDENCY_CHECK="${REQUIRE_DEPENDENCY_CHECK:-1}"
 PASS=0
 FAIL=0
 
@@ -91,9 +96,17 @@ for bin in gitleaks hadolint; do
     command -v "$bin" >/dev/null 2>&1 && ok "$bin on PATH" || bad "$bin missing (run scripts/install-tools.sh)"
 done
 
-# Dependency-Check CLI (Phase 1)
+# Dependency-Check CLI (Phase 1).
+# Hard failure while the stage is enabled; information only when the pipeline has
+# switched that stage off, because then no build step needs the CLI at all.
 DC_HOME="${DC_HOME:-/opt/dependency-check}"
-[ -x "$DC_HOME/bin/dependency-check.sh" ] && ok "Dependency-Check CLI at $DC_HOME" || bad "Dependency-Check CLI missing at $DC_HOME"
+if [ -x "$DC_HOME/bin/dependency-check.sh" ]; then
+    ok "Dependency-Check CLI at $DC_HOME"
+elif [ "$REQUIRE_DEPENDENCY_CHECK" = "1" ]; then
+    bad "Dependency-Check CLI missing at $DC_HOME (sudo bash scripts/install-dependency-check.sh)"
+else
+    info "Dependency-Check CLI absent at $DC_HOME, and not required: REQUIRE_DEPENDENCY_CHECK=0 (the Trivy dependency scan still runs)"
+fi
 
 # Listening ports that matter
 if command -v ss >/dev/null 2>&1; then
