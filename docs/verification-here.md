@@ -8,6 +8,14 @@ not verified here and must be captured on the VM.
 Development environment: Ubuntu 24.04, JDK 21.0.13, Maven 3.6.3, Docker **CLI only**
 (no daemon), no Jenkins, no SonarQube.
 
+> **Provenance, read this before quoting a number.** Every result below was produced in
+> this development environment, **not** by a Jenkins build on the VM. In particular the
+> nine-CVE finding (§2) comes from a `trivy` run here, before the upgrade; Jenkins has
+> never produced a Trivy or Dependency-Check result. The French report and the slides mark
+> every scan result as `[À REMPLIR: résultat réel du scan]` for that reason. What this
+> file does prove is that the scripts, the pipeline file and the application behave as
+> claimed — it does not substitute for the VM's build.
+
 ---
 
 ## 1. Executed, with results
@@ -23,7 +31,7 @@ Development environment: Ubuntu 24.04, JDK 21.0.13, Maven 3.6.3, Docker **CLI on
 | 7 | Compose validity + published ports | Docker Compose 2.40.3 | **valid**; 3000 on `0.0.0.0`, 9090/9093/9100 on `127.0.0.1` |
 | 8 | Prometheus / Alertmanager / Grafana provisioning | PyYAML 6.0.3 | 5 YAML documents parsed; **6 alert rules**, 3 scrape jobs |
 | 9 | Grafana dashboard structure | JSON parse | **6 panels**, all with expressions, uid `devsecops-overview` |
-| 10 | Jenkinsfile syntax + structure | Groovy 4.0.24 | parses; **20 stages, 12 parameters**; stage-name set identical to the previous commit |
+| 10 | Jenkinsfile syntax + structure | Groovy 4.0.24 | parses; **21 stages, 14 parameters**; pre-existing stage names unchanged |
 | 11 | Actuator surface of the running jar | `java -jar` on 18080 | `/actuator` 200, `/actuator/health` 200, `/actuator/prometheus` 200 (JVM metrics), `/actuator/env` `/beans` `/heapdump` **404** |
 | 12 | Security smoke test | `scripts/security-smoke-test.sh` | **13 passed, 0 failed** |
 | 13 | Security acceptance test | `scripts/security-acceptance-test.sh` | **11 passed, 0 failed** |
@@ -31,7 +39,8 @@ Development environment: Ubuntu 24.04, JDK 21.0.13, Maven 3.6.3, Docker **CLI on
 | 15 | Compliance check | `scripts/compliance-check.sh` | **9 passed, 0 failed** |
 | 16 | Configuration safety check | `scripts/config-safety-check.sh` | **fails closed** without a container (`0 passed, 1 failed`) — correct behaviour, it refuses to certify what it cannot inspect |
 | 17 | Infrastructure check | `scripts/infra-check.sh` | **6 passed, 7 failed** — expected: this host is not the VM (no Jenkins on 8080, no `/opt/dependency-check`) |
-| 18 | Negative tests | scripts run against deliberately broken inputs | a compose publishing `9090:9090` → **FAIL**; a discovery page advertising `/env` → **FAIL**; a Prometheus that is not ready → **FAIL** |
+| 18 | Negative tests | scripts run against deliberately broken inputs | a compose publishing `9090:9090` → **FAIL**; a discovery page advertising `/env` → **FAIL**; a Prometheus that is not ready → **FAIL**; an empty dependency list → SBOM generator **exits 1** (fails closed) |
+| 19 | Dependency scan without an API key (new stage) | trivy **0.76.2** `sbom` on the 62 resolved components | scan reaches the Java target; **0 CRITICAL** after the upgrade. `trivy fs .` alone was rejected: it reads `pom.xml` only and would pass vacuously (§3) |
 
 The checks in rows 12–15 and 18 are the same scripts the pipeline runs; only their targets
 are stand-ins here (a Python HTTP stub for Prometheus/Grafana/Alertmanager, the real jar for
@@ -78,6 +87,8 @@ pipeline detected a real critical exposure in its own application and forced a f
 | `post` removed `devsecops-net` while monitoring was attached | Prometheus loses its scrape target | remove the network only when nothing is attached |
 | unused loop variable in `install-phase4.sh` | shellcheck warning | `for _ in ...` |
 | MockMvc annotation moved | Boot 4 test compilation failure | new package + new test starter (§2) |
+| `install-dependency-check.sh` died on a fresh Ubuntu | `unzip` is not installed by default; the python3 fallback does not restore the executable bit, so the layout test (`-x`) failed | install `unzip` idempotently with apt-get, test the file with `-f`, and `chmod +x` after extraction |
+| `trivy fs .` would have been a false gate | it reads `pom.xml`, where `spring-boot-starter-parent` supplies the versions, and Trivy's fs scanner does not open jars (`language-specific files num=0`) | resolve the real set with `mvn dependency:list`, convert it to a CycloneDX SBOM, scan that with `trivy sbom`; the converter exits 1 on an empty list |
 
 ---
 

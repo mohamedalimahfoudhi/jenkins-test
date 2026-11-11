@@ -24,6 +24,8 @@
 //     OWASP Dependency-Check, SonarQube Scanner, JUnit, HTML Publisher,
 //     Timestamper, Credentials Binding
 //   VM binaries on PATH: gitleaks, hadolint, trivy, docker
+// (Preflight checks java, mvn, gitleaks, hadolint and trivy before any stage,
+//  so a missing scanner is reported once instead of inside a security stage.)
 //   (see docs/development-setup.md for the install scripts)
 //
 // Steps marked VERIFY should be confirmed once in
@@ -47,6 +49,16 @@ pipeline {
             name: 'RUN_SONAR',
             defaultValue: false,
             description: 'SAST: run the SonarQube analysis and wait for its quality gate. Needs a SonarQube server named "SonarQube" under Manage Jenkins > System, and roughly 2 GB of free RAM.'
+        )
+        booleanParam(
+            name: 'RUN_DEPENDENCY_CHECK',
+            defaultValue: true,
+            description: 'Phase 1: OWASP Dependency-Check, the NVD-backed SCA stage. Needs a valid NVD API key (credential nvd-api-key). Turn it off only while that key is rejected: the stage is then skipped, not weakened, and the Trivy fs scan below still covers the same dependencies without any API key.'
+        )
+        booleanParam(
+            name: 'RUN_TRIVY_FS',
+            defaultValue: true,
+            description: 'Phase 1: Trivy fs scan of the resolved application dependencies. No API key, no NVD feed; fails on CRITICAL.'
         )
 
         // ---- Phase 2 (Acceptance) ----
@@ -108,6 +120,8 @@ pipeline {
                     check "maven (tool maven)" mvn -v
                     check "gitleaks"           gitleaks version
                     check "hadolint"           hadolint --version
+                    check "trivy"              trivy --version
+                    check "python3"            python3 --version
 
                     if [ "$FAILED" -ne 0 ]; then
                         echo "--------------------------------------------------------------"
@@ -164,6 +178,12 @@ pipeline {
         }
 
         stage('Dependency scan (OWASP Dependency-Check)') {
+            // Skipped - never weakened - when the NVD API key is rejected: the
+            // gate itself (CVSS >= 9.0) stays in the post block and applies to
+            // every build that runs this stage.
+            when {
+                expression { params.RUN_DEPENDENCY_CHECK }
+            }
             steps {
                 // VERIFY: odcInstallation must match the tool name configured
                 // in Global Tool Configuration.
@@ -185,6 +205,70 @@ pipeline {
                         reportFiles       : 'dependency-check-report.html',
                         reportName        : 'Dependency-Check report'
                     ])
+                }
+            }
+        }
+
+        // Second, independent dependency scan: no API key, no NVD feed, no Docker.
+        //
+        // Dependency-Check answers "which published CVEs affect these libraries?"
+        // from the NVD data and needs a valid key. This stage answers "does any
+        // resolved dependency match a CVE in Trivy's own database?" and works
+        // offline. Complementary, not redundant: whoever has no working NVD key
+        // still scans, and the two databases do not publish on the same day.
+        //
+        // Why two Trivy commands instead of only `trivy fs .`:
+        //   * `trivy fs` reads pom.xml, but spring-boot-starter-parent manages the
+        //     versions there, so the file names almost none of them and the scan
+        //     reports nothing whatever the classpath contains.
+        //   * Trivy's fs scanner does not open jars either (with trivy 0.76.2 it
+        //     reports "language-specific files num=0" for target/ and for the fat
+        //     jar).
+        // So the stage resolves the real dependency set with Maven and scans that
+        // through a CycloneDX SBOM. scripts/generate-sbom.py fails closed on an
+        // empty list, which is what keeps this gate from passing vacuously.
+        stage('Dependency scan (Trivy fs)') {
+            when {
+                expression { params.RUN_TRIVY_FS }
+            }
+            steps {
+                sh '''
+                    set -u
+                    mkdir -p reports
+                    STATUS=0
+                    trivy --version
+
+                    # 1. the repository as it is: pom.xml, lockfiles, manifests
+                    trivy fs --scanners vuln --severity CRITICAL --exit-code 1 \
+                        --format table -o reports/trivy-fs-report.txt . || STATUS=1
+                    cat reports/trivy-fs-report.txt || true
+
+                    # 2. the dependency set actually resolved for the runtime
+                    mvn -B -ntp -q dependency:list -DincludeScope=runtime \
+                        -DoutputFile=reports/dependencies.txt || STATUS=1
+                    python3 scripts/generate-sbom.py \
+                        reports/dependencies.txt reports/sbom-cyclonedx.json || STATUS=1
+                    trivy sbom --scanners vuln --severity CRITICAL --exit-code 1 \
+                        --format table -o reports/trivy-fs-resolved-report.txt \
+                        reports/sbom-cyclonedx.json || STATUS=1
+                    cat reports/trivy-fs-resolved-report.txt || true
+
+                    # machine-readable versions, archived as evidence
+                    trivy fs --scanners vuln --format json \
+                        -o reports/trivy-fs-report.json . >/dev/null 2>&1 || true
+                    trivy sbom --scanners vuln --format json \
+                        -o reports/trivy-fs-resolved-report.json \
+                        reports/sbom-cyclonedx.json >/dev/null 2>&1 || true
+
+                    if [ "$STATUS" -ne 0 ]; then
+                        echo "Dependency scan failed: CRITICAL findings in the image-independent scan, or the scan could not run."
+                    fi
+                    exit "$STATUS"
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/trivy-fs-report.*,reports/trivy-fs-resolved-report.*,reports/sbom-cyclonedx.json,reports/dependencies.txt', allowEmptyArchive: true
                 }
             }
         }
@@ -446,7 +530,23 @@ pipeline {
                 sh '''
                     set -o pipefail
                     mkdir -p reports
-                    CONTAINER=devsecops-prod bash scripts/config-safety-check.sh | tee reports/config-safety-report.txt
+                    # The injected secret only exists on the production container.
+                    # With PROD_DEPLOY off, check the acceptance container instead
+                    # and mark the secret assertion as not applicable there; when
+                    # neither container exists the script fails closed.
+                    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx devsecops-prod; then
+                        CHECK_CONTAINER=devsecops-prod
+                        SECRET_REQUIRED=1
+                    elif docker ps --format '{{.Names}}' 2>/dev/null | grep -qx devsecops-app; then
+                        CHECK_CONTAINER=devsecops-app
+                        SECRET_REQUIRED=0
+                    else
+                        CHECK_CONTAINER=devsecops-prod
+                        SECRET_REQUIRED=1
+                    fi
+                    echo "configuration check target: $CHECK_CONTAINER (runtime secret required: $SECRET_REQUIRED)"
+                    CONTAINER="$CHECK_CONTAINER" SECRET_REQUIRED="$SECRET_REQUIRED" \
+                        bash scripts/config-safety-check.sh | tee reports/config-safety-report.txt
                 '''
             }
             post {

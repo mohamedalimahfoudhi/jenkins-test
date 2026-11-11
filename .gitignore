@@ -12,3 +12,7 @@ reports/
 
 # Phase 4: generated Grafana password
 monitoring/.env
+
+# Python bytecode (scripts/generate-sbom.py)
+__pycache__/
+*.pyc

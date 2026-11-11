@@ -12,7 +12,8 @@
 #
 # Re-runnable: an already extracted CLI of the right version is skipped, the
 # zip download resumes (curl -C -), and the database update continues from
-# whatever is already cached in $DC_HOME/data.
+# whatever is already cached in $DC_HOME/data. unzip is installed automatically
+# if it is missing (the python3 fallback does not restore the executable bit).
 #
 # Integrity: OWASP publishes the CLI zip plus a detached PGP signature
 # (dependency-check-<ver>-release.zip.asc) but no .sha256 sidecar, so this
@@ -83,14 +84,36 @@ else
     log "checksum OK: $ZIP"
 
     # ---------- extract ----------
+    # unzip is needed: python3's zipfile does not restore the executable bit, so
+    # on a fresh Ubuntu (no unzip installed) the CLI arrived non-executable and
+    # the layout test below failed. Install unzip idempotently first.
+    if ! command -v unzip >/dev/null; then
+        if [ "$AS_ROOT" -eq 1 ] && command -v apt-get >/dev/null; then
+            log "unzip not installed - installing it with apt-get"
+            DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+                || warn "apt-get update failed - trying the install anyway"
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends unzip \
+                || warn "could not install unzip with apt-get"
+        else
+            warn "unzip not installed and apt-get unavailable (not root?) - trying python3"
+        fi
+    fi
+
     TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
     if command -v unzip >/dev/null; then
         unzip -q "$CACHE_DIR/$ZIP" -d "$TMP"
     else
-        warn "unzip not installed - falling back to python3 zipfile"
+        command -v python3 >/dev/null \
+            || die "unzip and python3 are both missing - run: sudo apt-get install -y unzip"
+        warn "still no unzip - falling back to python3 zipfile (executable bit restored below)"
         python3 -m zipfile -e "$CACHE_DIR/$ZIP" "$TMP"
     fi
-    [ -x "$TMP/dependency-check/bin/dependency-check.sh" ] || die "unexpected archive layout: bin/dependency-check.sh missing"
+
+    DC_SH="$TMP/dependency-check/bin/dependency-check.sh"
+    [ -f "$DC_SH" ] || die "unexpected archive layout: bin/dependency-check.sh missing in $ZIP"
+    # Normalised here so this test checks the archive layout, not the permission
+    # bit that the extraction method happened to produce.
+    chmod +x "$DC_SH"
     mkdir -p "$DC_HOME"
     cp -a "$TMP/dependency-check/." "$DC_HOME/"
     log "extracted to $DC_HOME"

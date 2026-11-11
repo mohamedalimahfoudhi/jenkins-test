@@ -18,7 +18,8 @@ Checkout
        └─ Build                          mvn clean compile
             └─ Unit and security tests   mvn test (10 tests)
                  ├─ Secrets scan (Gitleaks)                  history-wide
-                 ├─ Dependency scan (OWASP Dependency-Check)  SCA
+                 ├─ Dependency scan (OWASP Dependency-Check)  SCA, NVD feed
+                 ├─ Dependency scan (Trivy fs)                SCA, no API key
                  ├─ Dockerfile lint (hadolint)                config as code
                  └─ Container image (build)  →  Container scan (Trivy)
                         └─ Deploy application container (18080)
@@ -35,20 +36,22 @@ Checkout
 post { always: remove app containers, archive reports }
 ```
 
-Twenty stages, twelve parameters. The stage names are stable — the report, the
-screenshots and the shell scripts refer to them by name.
+Twenty-one stages, fourteen parameters. The stage names are stable — the report,
+the screenshots and the shell scripts refer to them by name.
 
 ---
 
 ## 2. Parameters
 
-All twelve are `booleanParam`. Defaults are chosen so that a plain build is safe
+All fourteen are `booleanParam`. Defaults are chosen so that a plain build is safe
 on a 4 GB VM: anything heavy, optional, or that needs a credential is **off**
 unless you ask for it.
 
 | Parameter | Default | Phase | Effect | Needs |
 |---|---|---|---|---|
 | `RUN_SONAR` | off | 1 | Runs `sonar:sonar` and waits for the quality gate | SonarQube server named `SonarQube`, ~2 GB free RAM |
+| `RUN_DEPENDENCY_CHECK` | on | 1 | Runs the OWASP Dependency-Check stage (fails on CVSS ≥ 9.0) | Credential `nvd-api-key`, NVD data |
+| `RUN_TRIVY_FS` | on | 1 | Runs the Trivy dependency scan: repository manifests + the dependency set Maven resolved (fails on CRITICAL) | `trivy`, `python3`, Maven |
 | `BUILD_IMAGE` | on | 2 | Builds `devsecops-demo:ci` | Docker |
 | `TRIVY_SCAN` | on | 2 | Scans the image, fails on CRITICAL | `trivy` on PATH |
 | `DEPLOY_CONTAINER` | on | 2 | Runs the app container on 18080 | Docker |
@@ -66,9 +69,14 @@ without the other):
 
 * `TRIVY_SCAN` without `BUILD_IMAGE` → scans nothing (the image is missing) and fails.
 * `ZAP_SCAN`, `ACCEPTANCE_TESTS` without `DEPLOY_CONTAINER` → no target, they fail.
-* `SECURITY_SMOKE`/`CONFIG_SAFETY` without `PROD_DEPLOY` → smoke falls back to the
-  acceptance container on 18080; the configuration check needs the production
-  container and will report it missing.
+* `RUN_DEPENDENCY_CHECK` off → the NVD-backed scan is *skipped, never relaxed*; the
+  Trivy dependency scan still covers the same dependencies with no API key. Both
+  gates stay at CRITICAL/CVSS ≥ 9.0 whenever they run.
+* `SECURITY_SMOKE`/`CONFIG_SAFETY` without `PROD_DEPLOY` → both fall back to the
+  acceptance container on 18080; the configuration check then reports the
+  runtime-secret assertion as *information* instead of a pass, because only the
+  production container is supposed to carry that secret. With no container at
+  all, it fails closed.
 * `MONITORING` works on its own: `install-phase4.sh` creates the network if the
   application has not done it yet, but the `devsecops-app` scrape target only
   exists when `DEPLOY_CONTAINER` ran in the same build.
@@ -83,25 +91,26 @@ fails, which is the point: a failed build must still leave evidence.
 | # | Stage | Phase | What it proves | Gate (fails when) | Artifact |
 |---|---|---|---|---|---|
 | 1 | `Checkout` | 1 | The build runs on the right commit | SCM error | — |
-| 2 | `Preflight (tool checks)` | 1 | `java`, `mvn`, `gitleaks`, `hadolint` are usable | Any tool missing | — |
+| 2 | `Preflight (tool checks)` | 1 | `java`, `mvn`, `gitleaks`, `hadolint`, `trivy`, `python3` are usable | Any tool missing | — |
 | 3 | `Build` | 1 | The code compiles | Compile error | — |
 | 4 | `Unit and security tests` | 1 | Behaviour and security rules hold (10 tests) | Any test fails | `target/surefire-reports/*.xml` (JUnit view) |
 | 5 | `Secrets scan (Gitleaks)` | 1 | No secret in the whole git history | Any finding | `reports/gitleaks-report.json` |
-| 6 | `Dependency scan (OWASP Dependency-Check)` | 1 | Third-party libraries have no known critical CVE | Any CVSS ≥ 9.0 | `dependency-check-report.xml/html` |
-| 7 | `Dockerfile lint (hadolint)` | 1 | The Dockerfile follows the rules (pinned base, non-root, no `latest`) | Any lint finding | `reports/hadolint-report.txt` |
-| 8 | `Container image (build)` | 2 | The image builds reproducibly | `docker build` fails | `reports/image-id.txt` |
-| 9 | `Container scan (Trivy)` | 2 | The shipped image has no known critical CVE | Any CRITICAL | `reports/trivy-report.txt/.json` |
-| 10 | `Deploy application container` | 2 | The image actually starts and answers | Not ready within 40 s | container logs in the console |
-| 11 | `DAST (OWASP ZAP baseline)` | 2 | No baseline web finding against the running service | A ZAP `FAIL` rule (warnings do not fail, `-I`) | `reports/zap-report.html/.json` |
-| 12 | `Security acceptance tests` | 2 | The API's security contract (status codes, headers, error handling) | Any of 11 checks fails | `reports/acceptance-report.txt` |
-| 13 | `Infrastructure test (VM)` | 2 | The host is in the expected state (swap, docker, firewall, tools) | Any hard failure | `reports/infra-report.txt` |
-| 14 | `Compliance check (policy)` | 2 | Dockerfile/Jenkinsfile obey the written policy | Any of 9 checks fails | `reports/compliance-report.txt` |
-| 15 | `Deploy production container` | 3 | The service starts with a runtime secret injected | Not ready within 40 s | container logs |
-| 16 | `Security smoke tests` | 3 | Post-deploy security promises hold (13 checks) | Any check fails | `reports/smoke-report.txt` |
-| 17 | `Configuration safety check` | 3 | Runtime config is safe (ports, non-root, secret handling) | Any of 8 checks fails | `reports/config-safety-report.txt` |
-| 18 | `Operations: monitoring stack` | 4 | Prometheus/Alertmanager/Grafana/node_exporter start | Compose or readiness fails | — |
-| 19 | `Operations: metrics and alerts check` | 4 | Metrics flow, rules load, dashboard exists, exposure is loopback-only | Any of 14 checks fails | `reports/monitoring-report.txt` |
-| 20 | `SAST (SonarQube)` | 1 (SAST) | Static analysis and quality gate | Gate not OK | SonarQube UI |
+| 6 | `Dependency scan (OWASP Dependency-Check)` | 1 | Third-party libraries have no known critical CVE, from the NVD feed | Any CVSS ≥ 9.0 | `dependency-check-report.xml/html` |
+| 7 | `Dependency scan (Trivy fs)` | 1 | No resolved dependency matches a CRITICAL CVE in Trivy's database — no API key, no Docker | Any CRITICAL, or a scan that matched nothing | `reports/trivy-fs-report.*`, `reports/trivy-fs-resolved-report.*`, `reports/dependencies.txt`, `reports/sbom-cyclonedx.json` |
+| 8 | `Dockerfile lint (hadolint)` | 1 | The Dockerfile follows the rules (pinned base, non-root, no `latest`) | Any lint finding | `reports/hadolint-report.txt` |
+| 9 | `Container image (build)` | 2 | The image builds reproducibly | `docker build` fails | `reports/image-id.txt` |
+| 10 | `Container scan (Trivy)` | 2 | The shipped image has no known critical CVE | Any CRITICAL | `reports/trivy-report.txt/.json` |
+| 11 | `Deploy application container` | 2 | The image actually starts and answers | Not ready within 40 s | container logs in the console |
+| 12 | `DAST (OWASP ZAP baseline)` | 2 | No baseline web finding against the running service | A ZAP `FAIL` rule (warnings do not fail, `-I`) | `reports/zap-report.html/.json` |
+| 13 | `Security acceptance tests` | 2 | The API's security contract (status codes, headers, error handling) | Any of 11 checks fails | `reports/acceptance-report.txt` |
+| 14 | `Infrastructure test (VM)` | 2 | The host is in the expected state (swap, docker, firewall, tools) | Any hard failure | `reports/infra-report.txt` |
+| 15 | `Compliance check (policy)` | 2 | Dockerfile/Jenkinsfile obey the written policy | Any of 9 checks fails | `reports/compliance-report.txt` |
+| 16 | `Deploy production container` | 3 | The service starts with a runtime secret injected | Not ready within 40 s | container logs |
+| 17 | `Security smoke tests` | 3 | Post-deploy security promises hold (13 checks) | Any check fails | `reports/smoke-report.txt` |
+| 18 | `Configuration safety check` | 3 | Runtime config is safe (ports, non-root, secret handling) | Any of 8 checks fails | `reports/config-safety-report.txt` |
+| 19 | `Operations: monitoring stack` | 4 | Prometheus/Alertmanager/Grafana/node_exporter start | Compose or readiness fails | — |
+| 20 | `Operations: metrics and alerts check` | 4 | Metrics flow, rules load, dashboard exists, exposure is loopback-only | Any of 14 checks fails | `reports/monitoring-report.txt` |
+| 21 | `SAST (SonarQube)` | 1 (SAST) | Static analysis and quality gate | Gate not OK | SonarQube UI |
 
 ### Why this order
 
@@ -145,6 +154,9 @@ failed build still leaves its evidence:
 | `target/surefire-reports/*.xml` | Unit and security tests (also published in the JUnit view) |
 | `reports/gitleaks-report.json` | Secrets scan |
 | `dependency-check-report.html` / `.xml` | Dependency scan (HTML published in the job page) |
+| `reports/trivy-fs-report.txt` / `.json` | Dependency scan (Trivy fs) — repository manifests |
+| `reports/dependencies.txt`, `reports/sbom-cyclonedx.json` | Dependency scan (Trivy fs) — the dependency set Maven resolved, as a CycloneDX SBOM |
+| `reports/trivy-fs-resolved-report.txt` / `.json` | Dependency scan (Trivy fs) — the scan of that SBOM |
 | `reports/hadolint-report.txt` | Dockerfile lint |
 | `reports/image-id.txt` | Container image (build) — the exact image under test |
 | `reports/trivy-report.txt` / `.json` | Container scan |
@@ -186,7 +198,10 @@ First build, with the defaults (safe on 4 GB):
 2. Expect every stage except `Deploy production container`, the operations
    stages and `SAST (SonarQube)` to run (they are off by default).
 3. On a slow link the first build is dominated by the NVD download
-   (Dependency-Check) and the Trivy database; later builds reuse both.
+   (Dependency-Check) and the Trivy database (≈ 133 MB); later builds reuse both.
+4. If the NVD key is rejected (`Invalid apiKey`), untick
+   `RUN_DEPENDENCY_CHECK` rather than deleting the stage: the Trivy dependency
+   scan covers the same dependencies without any key.
 
 Full demonstration build:
 
@@ -204,8 +219,10 @@ Individual scripts can also be run by hand on the VM; each one documents its
 |---|---|---|
 | `Preflight` red: `gitleaks: command not found` | Tools installed under a different user | `sudo bash scripts/install-tools.sh`; tools land in `/usr/local/bin` |
 | `Preflight` red: `mvn -v` fails | Tool names differ in this Jenkins | Global Tool Configuration: JDK `jdk21`, Maven `maven` |
-| `Dependency scan` fails at start | NVD API key missing or invalid | Credential `nvd-api-key` (secret text) under Manage Jenkins > Credentials |
+| `Dependency scan` fails at start | NVD API key missing or invalid (`Invalid apiKey`) | Fix or regenerate the key at nvd.nist.gov, or untick `RUN_DEPENDENCY_CHECK`: the Trivy dependency scan still runs, so the build is not left unscanned |
 | `Dependency scan` times out | NVD rate limit on a slow link | Run it once more; the local NVD cache is reused |
+| `Dependency scan (Trivy fs)` red: `refusing to write an empty SBOM` | `mvn dependency:list` produced nothing — usually a local repository the `jenkins` user cannot write | Read the Maven error printed just above it, then fix ownership of `~jenkins/.m2` |
+| `Dependency scan (Trivy fs)` red on CRITICAL | A dependency that actually ships has a known critical CVE | That is the gate working: fix the dependency (the fix in this project was raising Spring Boot), never the threshold. Details in `reports/trivy-fs-resolved-report.txt` |
 | `Container image` fails: `permission denied /var/run/docker.sock` | `jenkins` not in the `docker` group | `sudo bash scripts/install-phase2.sh`, then log out/in for Jenkins |
 | `Deploy application container`: not ready in 40 s | Image starts but the app crashes | Read `docker logs devsecops-app` printed by the stage |
 | `Deploy application container`: port already allocated | A previous container still holds 18080 | `docker rm -f devsecops-app` (the pipeline does this itself, so this means something else owns the port) |
@@ -217,7 +234,29 @@ Individual scripts can also be run by hand on the VM; each one documents its
 
 ---
 
-## 8. Non-goals
+## 8. First run on the VM — the most likely failure per stage
+
+None of the stages below has ever executed: no build has been run on the VM yet, so
+these are the failures to expect first, on Ubuntu 22.04 with 4 GB of RAM and Jenkins
+running as the `jenkins` user. Each has a one-line fix.
+
+| Stage | Most likely failure | One-line fix |
+|---|---|---|
+| `Container image (build)` | `permission denied while trying to connect to the Docker daemon socket` — `jenkins` is not in the `docker` group | `sudo usermod -aG docker jenkins && sudo systemctl restart jenkins` |
+| `Container scan (Trivy)` | `devsecops-demo:ci not found` (image not built), or no disk left for the Trivy DB in `~jenkins/.cache/trivy` | Keep `BUILD_IMAGE` ticked; `df -h /` and `sudo du -sh /var/lib/docker` before the demo |
+| `Deploy application container` | `port is already allocated` — a container from an aborted build still holds 18080 | `docker rm -f devsecops-app` (the pipeline clears its own, so something else owns the port) |
+| `DAST (OWASP ZAP baseline)` | the 1 GB ZAP image is not pulled yet, or the box swaps on 4 GB | `docker pull zaproxy/zap-stable:2.17.0`, then run ZAP with `RUN_SONAR` off |
+| `Security acceptance tests` | `curl: (7) Failed to connect` — nothing is listening on 18080 | Keep `DEPLOY_CONTAINER` ticked and read `docker logs devsecops-app` |
+| `Infrastructure test (VM)` | no swap on a 4 GB VM, or ufw/fail2ban absent | `sudo bash scripts/add-swap.sh`; `sudo bash scripts/install-phase3.sh` |
+| `Compliance check (policy)` | `Jenkinsfile not found` — the job checked out a branch without it | Point the job at `devsecops-final` |
+| `Deploy production container` | `Could not find credentials entry with ID 'app-api-key'` | Create the secret-text credential with that exact ID |
+| `Security smoke tests` | no container on 18081 or 18080 | Tick `PROD_DEPLOY` (or `DEPLOY_CONTAINER`) |
+| `Configuration safety check` | an unexpected port is listening on all interfaces | `sudo ss -ltnp`; fix the source. 9090/9093/9100 are loopback-only by design, only 3000 and 8080/18080/18081 should be published |
+| `Operations: monitoring stack` | `monitoring/.env` missing, or no `GRAFANA_ADMIN_PASSWORD` in it | `sudo bash scripts/install-phase4.sh` (regenerates it, mode 0600) |
+| `Operations: metrics and alerts check` | `up{job="devsecops-app"} == 0` because the application container was removed at the end of a previous build | Re-run with `DEPLOY_CONTAINER` ticked, or accept 13/14 and explain the alerting scenario |
+| `SAST (SonarQube)` | no server named `SonarQube` under Manage Jenkins > System | Leave `RUN_SONAR` off (it is off by default and declared optional) |
+
+## 9. Non-goals
 
 Stated so nobody mistakes absence for an oversight:
 
@@ -234,7 +273,7 @@ Stated so nobody mistakes absence for an oversight:
 
 ---
 
-## 9. Where the phase evidence lives
+## 10. Where the phase evidence lives
 
 | Phase | Branch | Proof |
 |---|---|---|

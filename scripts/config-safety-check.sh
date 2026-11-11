@@ -11,7 +11,10 @@
 #   4. the container is not privileged, not on host networking, and does not
 #      mount the docker socket
 #   5. secrets are injected at runtime, not baked in: APP_API_KEY is set in the
-#      environment and is not the example placeholder
+#      environment and is not the example placeholder. Only the production
+#      container is expected to carry it: SECRET_REQUIRED=0 (used by the
+#      pipeline when it checks the acceptance container) reports this check as
+#      INFORMATION instead of passing or failing it.
 #   6. only expected ports are bound on all interfaces
 #
 # Values of environment variables are never printed - only set/unset.
@@ -19,6 +22,7 @@
 # Usage:
 #   bash scripts/config-safety-check.sh
 #   CONTAINER=devsecops-prod APP_PORT=18081 bash scripts/config-safety-check.sh
+#   CONTAINER=devsecops-app SECRET_REQUIRED=0 bash scripts/config-safety-check.sh
 #
 # Exit 0 = configuration is safe enough to keep, 1 = fix before promoting.
 
@@ -26,6 +30,7 @@ set -uo pipefail
 
 CONTAINER="${CONTAINER:-devsecops-prod}"
 APP_PORT="${APP_PORT:-18081}"
+SECRET_REQUIRED="${SECRET_REQUIRED:-1}"
 EXPECTED_PORTS="${EXPECTED_PORTS:-22 8080 18080 18081 3000}"
 PASS=0
 FAIL=0
@@ -84,7 +89,11 @@ fi
 envdump="$(docker inspect "$CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}')"
 api_key="$(printf '%s\n' "$envdump" | sed -n 's/^APP_API_KEY=//p')"
 if [ -z "$api_key" ]; then
-    fail "APP_API_KEY is not set in the container environment"
+    if [ "$SECRET_REQUIRED" = "1" ]; then
+        fail "APP_API_KEY is not set in the container environment"
+    else
+        info "APP_API_KEY not expected on '$CONTAINER' (SECRET_REQUIRED=0): the injected secret is asserted on the production container"
+    fi
 elif [ "$api_key" = "replace-me" ]; then
     fail "APP_API_KEY still holds the .env.example placeholder"
 else

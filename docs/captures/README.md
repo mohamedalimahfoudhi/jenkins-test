@@ -10,7 +10,7 @@ capturer un écran vide.
 
 | # | Fichier attendu | Où / quoi capturer | Commande ou écran | Résultat attendu |
 |---|---|---|---|---|
-| 1 | `01-pipeline-phase1.png` | Jenkins → build Phase 1 → *Pipeline Steps* ou vue des stages | build vert | stages Build, Tests, Secrets, Dependency, hadolint visibles |
+| 1 | `01-pipeline-phase1.png` | Jenkins → build Phase 1 → *Pipeline Steps* ou vue des stages | build vert | stages Build, Tests, Secrets, Dependency-Check, Trivy fs, hadolint visibles |
 | 2 | `02-precommit-bloque.png` | terminal du poste de travail | `git commit` avec un faux secret dans un fichier | commit refusé, message gitleaks |
 | 3 | `03-tests-unitaires.png` | Jenkins → vue *Tests* du build | stage *Unit and security tests* | 10 tests, 0 échec |
 | 4 | `04-gitleaks.png` | artefact `reports/gitleaks-report.json` ou log du stage | stage *Secrets scan* | aucune fuite (`[]` ou absence de finding) |
@@ -34,7 +34,8 @@ capturer un écran vide.
 | 22 | `22-grafana-dashboard.png` | navigateur Windows | `http://192.168.33.10:3000` → dossier **DevSecOps** | 6 panneaux avec courbes |
 | 23 | `23-alerte-firing.png` | navigateur Windows via tunnel | `http://127.0.0.1:9090/alerts` puis Alertmanager `:9093` | `ApplicationDown` **firing** |
 | 24 | `24-monitoring-14.png` | terminal VM | `bash scripts/monitoring-check.sh` | `Result: 14 passed, 0 failed` |
-| 25 | `25-pipeline-final.png` | Jenkins → vue des stages du build final | build avec `PROD_DEPLOY` + `MONITORING` | 20 stages, verts (SonarQube optionnel) |
+| 25 | `25-pipeline-final.png` | Jenkins → vue des stages du build final | build avec `PROD_DEPLOY` + `MONITORING` | 21 stages, verts (SonarQube optionnel) |
+| 26 | `26-trivy-fs.png` | artefact `reports/trivy-fs-resolved-report.txt` ou log du stage *Dependency scan (Trivy fs)* | build | dépendances résolues (SBOM CycloneDX) scannées, aucune CVE CRITICAL |
 
 ## Accès navigateur : Prometheus et Alertmanager ne sont plus publiés
 

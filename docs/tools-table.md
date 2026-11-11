@@ -22,7 +22,7 @@ number comes from.
 | OWASP Dependency-Check | **13.0.0** | 1 | Software composition analysis (known CVEs in dependencies) | `scripts/install-dependency-check.sh` → `/opt/dependency-check`, **sha256 pinned** in the script | Any CVSS ≥ 9.0 |
 | hadolint | **2.15.1** | 1 | Dockerfile lint | `scripts/install-tools.sh` → `/usr/local/bin`, **sha256 verified** against `checksums.sha256` | Any lint finding |
 | Docker Engine + buildx + Compose v2 | Ubuntu package set from Docker's apt repo | 2, 3, 4 | Build/run containers, compose stack | `scripts/install-phase2.sh`, vendor GPG key + `signed-by` | Container does not start |
-| Trivy | Aqua apt repository (current at install time) | 2 | Image CVE scan | `scripts/install-phase2.sh`, vendor GPG key | Any **CRITICAL** finding |
+| Trivy | Aqua apt repository (current at install time) | 1, 2 | Image CVE scan; dependency scan of the resolved set through a CycloneDX SBOM (stage *Dependency scan (Trivy fs)*), which needs no API key and no Docker | `scripts/install-phase2.sh`, vendor GPG key | Any **CRITICAL** finding |
 | OWASP ZAP | **2.17.0** (`zaproxy/zap-stable:2.17.0`) | 2 | Baseline DAST against the running container | `scripts/install-phase2.sh` (image pull) | A ZAP `FAIL` rule (warnings do not fail: `-I`) |
 | SonarQube | `sonarqube:community` (floating tag, optional) | 1 | SAST + quality gate, only with `RUN_SONAR` | `scripts/install-phase2.sh` (optional pull) | Quality gate not OK |
 | ufw | Ubuntu 22.04 package | 3 | Host firewall; SSH allowed before enabling | `scripts/install-phase3.sh` | — (checked by `config-safety-check.sh`) |
@@ -96,11 +96,17 @@ container). Neither value appears in the repository or in the Jenkinsfile.
    there.
 5. **No tool here is a substitute for a real CD setup:** the image is never
    pushed to a registry, and "production" is a second container on the same VM.
-6. **The framework version was raised because the scan demanded it.** Trivy found
-   9 CRITICAL vulnerabilities in Spring Boot 3.3.5 (Tomcat 10.1.31 and spring-webmvc
-   6.1.14); the parent was moved to 4.1.2 and the same scan now reports no
-   vulnerabilities. The gate was not relaxed — the dependency was fixed
-   (`docs/verification-here.md` §2).
+6. **The nine-CVE finding came from a development environment, not from Jenkins.**
+   A `trivy` run on the machine where the pipeline was written reported 9 CRITICAL
+   vulnerabilities in Spring Boot 3.3.5 (Tomcat 10.1.31, spring-webmvc 6.1.14); the
+   parent was moved to 4.1.2 and the same scan then reported none. The gate was not
+   relaxed — the dependency was fixed (`docs/verification-here.md` §2). Quote the build's
+   own result in the report, not this one.
+7. **Trivy's fs scanner does not open jars,** and this project inherits its versions
+   from `spring-boot-starter-parent`, so `trivy fs .` on `pom.xml` alone would report
+   nothing whatever the classpath contains. That is why the stage scans a CycloneDX SBOM
+   generated from Maven's resolved dependency list (`scripts/generate-sbom.py`, which
+   fails closed on an empty list) instead of trusting a vacuous result.
 
 ---
 
