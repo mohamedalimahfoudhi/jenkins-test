@@ -239,8 +239,27 @@ pipeline {
                 // installation, while scripts/install-dependency-check.sh had
                 // already installed a working CLI. No plugin tool needed now.
                 withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
+                    // Diagnostic only: asks NVD directly with the credential Jenkins
+                    // injected, before Dependency-Check touches it. set +x first keeps
+                    // the header out of the console; the key is never echoed.
                     sh '''
+                        set +x
+                        # Trim exactly like the Dependency-Check step below, so this
+                        # asks NVD with the value that will actually be sent: a trailing
+                        # newline in the credential would otherwise make the header
+                        # malformed and produce a misleading 000/403.
+                        KEY_DIAG="$(printf '%s' "$NVD_API_KEY" | tr -d '[:space:]')"
+                        echo "Checking NVD API key from Jenkins (${#KEY_DIAG} chars)..."
+                        curl -sS -o /dev/null -w "Jenkins credential HTTP %{http_code}\n" \
+                          -H "apiKey: $KEY_DIAG" \
+                          "https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=1"
+                    '''
+                    sh '''
+                        # set +x immediately: this block expands the NVD secret, and
+                        # Jenkins runs sh with -x, whose trace shows the expansion of
+                        # every command substitution - including the key.
                         set -eu
+                        set +x
                         DC_HOME="${DC_HOME:-/opt/dependency-check}"
                         DC_CLI="$DC_HOME/bin/dependency-check.sh"
                         if [ ! -x "$DC_CLI" ]; then
@@ -267,10 +286,28 @@ pipeline {
                         # The NVD key goes into a 0600 property file, never on the
                         # command line: Jenkins runs sh with -x, so an argument would
                         # be echoed into this console.
+                        #
+                        # A trailing newline or space pasted into the Jenkins credential
+                        # is the classic cause of "Invalid API Key" while the same key
+                        # works from a terminal, so the value is trimmed: an NVD key
+                        # never contains whitespace. The value itself is never printed -
+                        # only its length.
+                        KEY="$(printf '%s' "$NVD_API_KEY" | tr -d '[:space:]')"
+                        echo "nvd-api-key credential: ${#NVD_API_KEY} chars raw, ${#KEY} chars after trimming whitespace"
+                        case "$KEY" in
+                            ????????-????-????-????-????????????) : ;;
+                            *)
+                                echo "the nvd-api-key credential does not look like an NVD key"
+                                echo "(expected four groups 8-4-4-4-12, no quotes, no newline)"
+                                echo "Re-enter it under Manage Jenkins > Credentials, or untick RUN_DEPENDENCY_CHECK."
+                                exit 1
+                                ;;
+                        esac
+
                         umask 077
                         PROPS="$(mktemp)"
                         trap 'rm -f "$PROPS"' EXIT
-                        printf 'nvd.api.key=%s\n' "$NVD_API_KEY" > "$PROPS"
+                        printf 'nvd.api.key=%s\n' "$KEY" > "$PROPS"
 
                         # --failOnCVSS 9 is the gate: exit non-zero on any CRITICAL.
                         "$DC_CLI" \
