@@ -19,7 +19,7 @@ number comes from.
 | Spring Boot webmvc test support | managed by Boot 4.1.2 | 1 | `@AutoConfigureMockMvc`: Boot 4 moved it out of `starter-test` into its own module | `spring-boot-starter-webmvc-test` | Compilation of the tests |
 | Micrometer Prometheus registry | managed by Boot 4.1.2 | 4 | Exposes `/actuator/prometheus` | `pom.xml` | — |
 | gitleaks | **8.30.1** | 1 | Secrets scan over the whole git history | `scripts/install-tools.sh` → `/usr/local/bin`, **sha256 verified** against the project's `checksums.txt` | Any finding |
-| OWASP Dependency-Check | **13.0.0** | 1 | Software composition analysis (known CVEs in dependencies) | `scripts/install-dependency-check.sh` → `/opt/dependency-check`, **sha256 pinned** in the script | Any CVSS ≥ 9.0 |
+| OWASP Dependency-Check | **13.0.0** | 1 | Software composition analysis (known CVEs in dependencies). Run as a **CLI**, not through the Jenkins plugin: the plugin's tool registration came back empty on the VM (`Couldn't find any executable in "null"`) | `scripts/install-dependency-check.sh` → `/opt/dependency-check`, **sha256 pinned** in the script | Any CVSS ≥ 9.0 (`--failOnCVSS 9`) |
 | hadolint | **2.15.1** | 1 | Dockerfile lint | `scripts/install-tools.sh` → `/usr/local/bin`, **sha256 verified** against `checksums.sha256` | Any lint finding |
 | Docker Engine + buildx + Compose v2 | Ubuntu package set from Docker's apt repo | 2, 3, 4 | Build/run containers, compose stack | `scripts/install-phase2.sh`, vendor GPG key + `signed-by` | Container does not start |
 | Trivy | Aqua apt repository (current at install time) | 1, 2 | Image CVE scan; dependency scan of the resolved set through a CycloneDX SBOM (stage *Dependency scan (Trivy fs)*), which needs no API key and no Docker | `scripts/install-phase2.sh`, vendor GPG key | Any **CRITICAL** finding |
@@ -67,6 +67,7 @@ container). Neither value appears in the repository or in the Jenkinsfile.
 |---|---|---|
 | gitleaks (standalone binary) | gitleaks Jenkins plugin | Standalone binary is one version, checksum-verified, identical locally (pre-commit hook) and in CI |
 | Dependency-Check **CLI** | `dependency-check-maven` plugin | Maven **3.6.3** cannot run plugin 13.x (needs a newer Maven); the CLI gives the same report without upgrading Maven |
+| Dependency-Check **CLI** | the Jenkins OWASP Dependency-Check plugin's `dependencyCheck` step | that step needs a tool registration with a real installation; on the VM it was empty and aborted the build with `Couldn't find any executable in "null"` before any scan. The CLI from our own installer needs no Jenkins tool, and the HTML report is still published |
 | hadolint (standalone) | Dockerfile lint in SonarQube | Runs in one second, no server needed, and the rule set is the industry default |
 | Trivy for the **image** | Dependency-Check only | Dependency-Check sees libraries; Trivy sees the OS packages inside the image too |
 | ZAP **baseline** scan | ZAP full scan | A full scan needs a long-running job and much more RAM; the baseline is the honest fit for a 4 GB VM |

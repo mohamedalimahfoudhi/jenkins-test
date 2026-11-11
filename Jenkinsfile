@@ -14,17 +14,19 @@
 //
 // Prerequisites in Jenkins:
 //   Manage Jenkins > Global Tool Configuration:
-//     JDK              name: jdk21
-//     Maven            name: maven
-//     Dependency-Check name: dependency-check
+//     JDK   name: jdk21
+//     Maven name: maven
 //   Manage Jenkins > Credentials:
 //     nvd-api-key  (secret text) - NVD API key for Dependency-Check
 //     app-api-key  (secret text) - runtime secret for the production container
 //   Manage Jenkins > Plugins:
-//     OWASP Dependency-Check, SonarQube Scanner, JUnit, HTML Publisher,
-//     Timestamper, Credentials Binding
+//     SonarQube Scanner, JUnit, HTML Publisher, Timestamper, Credentials Binding
+//     (the OWASP Dependency-Check plugin is NOT required: its tool registration came
+//      back empty on the VM and aborted the build with "Couldn't find any executable
+//      in null", so the stage runs the CLI installed by scripts/install-dependency-check.sh)
 //   VM binaries on PATH: gitleaks, hadolint, trivy, docker
-// (Preflight checks java, mvn, gitleaks, hadolint and trivy before any stage,
+//   VM install: /opt/dependency-check/bin/dependency-check.sh (scripts/install-dependency-check.sh)
+// (Preflight checks java, mvn, gitleaks, hadolint, trivy and python3 before any stage,
 //  so a missing scanner is reported once instead of inside a security stage.)
 //   (see docs/development-setup.md for the install scripts)
 //
@@ -185,25 +187,68 @@ pipeline {
                 expression { params.RUN_DEPENDENCY_CHECK }
             }
             steps {
-                // VERIFY: odcInstallation must match the tool name configured
-                // in Global Tool Configuration.
-                dependencyCheck odcInstallation: 'dependency-check',
-                        nvdCredentialsId: 'nvd-api-key',
-                        additionalArguments: '--format XML --format HTML'
+                // Runs the CLI directly instead of the plugin's dependencyCheck
+                // step. On the VM that step aborted the whole build with
+                //   ERROR: Couldn't find any executable in "null"
+                // because the plugin's tool registration had no usable
+                // installation, while scripts/install-dependency-check.sh had
+                // already installed a working CLI. No plugin tool needed now.
+                withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_API_KEY')]) {
+                    sh '''
+                        set -eu
+                        DC_HOME="${DC_HOME:-/opt/dependency-check}"
+                        DC_CLI="$DC_HOME/bin/dependency-check.sh"
+                        if [ ! -x "$DC_CLI" ]; then
+                            echo "Dependency-Check CLI not found at $DC_CLI"
+                            echo "Fix on the VM: sudo bash scripts/install-dependency-check.sh"
+                            echo "(or untick RUN_DEPENDENCY_CHECK - the Trivy dependency scan still runs)"
+                            exit 1
+                        fi
+                        mkdir -p reports
+                        "$DC_CLI" --version
+
+                        # The CLI scans jars, and spring-boot-starter-parent owns the
+                        # versions in pom.xml, so scanning the source tree alone would
+                        # find nothing and report a clean project. Resolve what ships.
+                        mvn -B -ntp -q dependency:copy-dependencies \
+                            -DincludeScope=runtime -DoutputDirectory=target/deps
+                        JARS="$(find target/deps -name '*.jar' | wc -l)"
+                        if [ "$JARS" -eq 0 ]; then
+                            echo "no dependency jar in target/deps - refusing to report a clean scan"
+                            exit 1
+                        fi
+                        echo "scanning $JARS dependency jars with Dependency-Check"
+
+                        # The NVD key goes into a 0600 property file, never on the
+                        # command line: Jenkins runs sh with -x, so an argument would
+                        # be echoed into this console.
+                        umask 077
+                        PROPS="$(mktemp)"
+                        trap 'rm -f "$PROPS"' EXIT
+                        printf 'nvd.api.key=%s\n' "$NVD_API_KEY" > "$PROPS"
+
+                        # --failOnCVSS 9 is the gate: exit non-zero on any CRITICAL.
+                        "$DC_CLI" \
+                            --project devops-demo \
+                            --scan target/deps \
+                            --format XML --format HTML \
+                            --out reports \
+                            --data "$DC_HOME/data" \
+                            --propertyfile "$PROPS" \
+                            --failOnCVSS 9
+                    '''
+                }
             }
             post {
                 always {
-                    // Fail only on CVSS >= 9.0 (Critical). High/Medium/Low are
-                    // reported but do not fail the build.
-                    dependencyCheckPublisher pattern: 'dependency-check-report.xml', failedTotalCritical: 1
-                    archiveArtifacts artifacts: 'dependency-check-report.*', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'reports/dependency-check-report.*', allowEmptyArchive: true
                     publishHTML(target: [
-                        allowMissing      : true,
+                        allowMissing         : true,
                         alwaysLinkToLastBuild: true,
-                        keepAll           : true,
-                        reportDir         : '.',
-                        reportFiles       : 'dependency-check-report.html',
-                        reportName        : 'Dependency-Check report'
+                        keepAll              : true,
+                        reportDir            : 'reports',
+                        reportFiles          : 'dependency-check-report.html',
+                        reportName           : 'Dependency-Check report'
                     ])
                 }
             }

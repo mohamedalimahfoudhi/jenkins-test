@@ -88,6 +88,7 @@ pipeline detected a real critical exposure in its own application and forced a f
 | unused loop variable in `install-phase4.sh` | shellcheck warning | `for _ in ...` |
 | MockMvc annotation moved | Boot 4 test compilation failure | new package + new test starter (§2) |
 | `install-dependency-check.sh` died on a fresh Ubuntu | `unzip` is not installed by default; the python3 fallback does not restore the executable bit, so the layout test (`-x`) failed | install `unzip` idempotently with apt-get, test the file with `-f`, and `chmod +x` after extraction |
+| Dependency-Check stage aborted before scanning (seen on the VM's first build) | the plugin's `dependencyCheck` step resolved its tool to `null` and printed `ERROR: Couldn't find any executable in "null"`, so nothing was analysed and the whole build stopped there | the stage runs the CLI installed by `scripts/install-dependency-check.sh` (`--failOnCVSS 9`), needs no Jenkins tool registration, and the NVD key travels in a 0600 property file because Jenkins runs `sh` with `-x` |
 | `trivy fs .` would have been a false gate | it reads `pom.xml`, where `spring-boot-starter-parent` supplies the versions, and Trivy's fs scanner does not open jars (`language-specific files num=0`) | resolve the real set with `mvn dependency:list`, convert it to a CycloneDX SBOM, scan that with `trivy sbom`; the converter exits 1 on an empty list |
 
 ---

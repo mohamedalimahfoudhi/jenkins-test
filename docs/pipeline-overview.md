@@ -95,7 +95,7 @@ fails, which is the point: a failed build must still leave evidence.
 | 3 | `Build` | 1 | The code compiles | Compile error | — |
 | 4 | `Unit and security tests` | 1 | Behaviour and security rules hold (10 tests) | Any test fails | `target/surefire-reports/*.xml` (JUnit view) |
 | 5 | `Secrets scan (Gitleaks)` | 1 | No secret in the whole git history | Any finding | `reports/gitleaks-report.json` |
-| 6 | `Dependency scan (OWASP Dependency-Check)` | 1 | Third-party libraries have no known critical CVE, from the NVD feed | Any CVSS ≥ 9.0 | `dependency-check-report.xml/html` |
+| 6 | `Dependency scan (OWASP Dependency-Check)` | 1 | Third-party libraries have no known critical CVE, from the NVD feed. Runs the CLI from `scripts/install-dependency-check.sh`, not the plugin's tool registration | Any CVSS ≥ 9.0 (`--failOnCVSS 9`), or no dependency jar resolved | `reports/dependency-check-report.xml/html` |
 | 7 | `Dependency scan (Trivy fs)` | 1 | No resolved dependency matches a CRITICAL CVE in Trivy's database — no API key, no Docker | Any CRITICAL, or a scan that matched nothing | `reports/trivy-fs-report.*`, `reports/trivy-fs-resolved-report.*`, `reports/dependencies.txt`, `reports/sbom-cyclonedx.json` |
 | 8 | `Dockerfile lint (hadolint)` | 1 | The Dockerfile follows the rules (pinned base, non-root, no `latest`) | Any lint finding | `reports/hadolint-report.txt` |
 | 9 | `Container image (build)` | 2 | The image builds reproducibly | `docker build` fails | `reports/image-id.txt` |
@@ -153,7 +153,7 @@ failed build still leaves its evidence:
 |---|---|
 | `target/surefire-reports/*.xml` | Unit and security tests (also published in the JUnit view) |
 | `reports/gitleaks-report.json` | Secrets scan |
-| `dependency-check-report.html` / `.xml` | Dependency scan (HTML published in the job page) |
+| `reports/dependency-check-report.html` / `.xml` | Dependency scan (HTML published in the job page) |
 | `reports/trivy-fs-report.txt` / `.json` | Dependency scan (Trivy fs) — repository manifests |
 | `reports/dependencies.txt`, `reports/sbom-cyclonedx.json` | Dependency scan (Trivy fs) — the dependency set Maven resolved, as a CycloneDX SBOM |
 | `reports/trivy-fs-resolved-report.txt` / `.json` | Dependency scan (Trivy fs) — the scan of that SBOM |
@@ -219,7 +219,9 @@ Individual scripts can also be run by hand on the VM; each one documents its
 |---|---|---|
 | `Preflight` red: `gitleaks: command not found` | Tools installed under a different user | `sudo bash scripts/install-tools.sh`; tools land in `/usr/local/bin` |
 | `Preflight` red: `mvn -v` fails | Tool names differ in this Jenkins | Global Tool Configuration: JDK `jdk21`, Maven `maven` |
+| `Dependency scan` red: `ERROR: Couldn't find any executable in "null"` | the **plugin's** tool registration was empty — this is what happened on the first VM build | the stage no longer uses the plugin: rebuild with the current `Jenkinsfile`. If it instead prints `Dependency-Check CLI not found at /opt/dependency-check/...`, run `sudo bash scripts/install-dependency-check.sh` |
 | `Dependency scan` fails at start | NVD API key missing or invalid (`Invalid apiKey`) | Fix or regenerate the key at nvd.nist.gov, or untick `RUN_DEPENDENCY_CHECK`: the Trivy dependency scan still runs, so the build is not left unscanned |
+| `Dependency scan` red: `no dependency jar in target/deps` | `mvn dependency:copy-dependencies` produced nothing | Read the Maven error above it (usually the `jenkins` user cannot write `~/.m2`) |
 | `Dependency scan` times out | NVD rate limit on a slow link | Run it once more; the local NVD cache is reused |
 | `Dependency scan (Trivy fs)` red: `refusing to write an empty SBOM` | `mvn dependency:list` produced nothing — usually a local repository the `jenkins` user cannot write | Read the Maven error printed just above it, then fix ownership of `~jenkins/.m2` |
 | `Dependency scan (Trivy fs)` red on CRITICAL | A dependency that actually ships has a known critical CVE | That is the gate working: fix the dependency (the fix in this project was raising Spring Boot), never the threshold. Details in `reports/trivy-fs-resolved-report.txt` |
