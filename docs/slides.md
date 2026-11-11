@@ -44,8 +44,9 @@ sécurité, hook pre-commit doublé côté serveur (un hook se contourne avec `-
 **À l'écran :** captures 3, 4, 5, 6 (10 tests, gitleaks, Dependency-Check, hadolint).
 
 **À dire :** chaque outil a une porte explicite : gitleaks bloque au premier secret,
-Dependency-Check seulement sur CVSS ≥ 9, hadolint bloque sur toute alerte. Une porte qui ne
-bloque jamais n'est pas une sécurité.
+Dependency-Check seulement sur CVSS ≥ 9, le scan Trivy des dépendances échoue sur CRITIQUE
+sans avoir besoin de clé API, hadolint bloque sur toute alerte. Une porte qui ne bloque
+jamais n'est pas une sécurité.
 
 ---
 
@@ -63,9 +64,9 @@ de conformité.
 
 **À l'écran :** captures 7, 8, 9, 10.
 
-**À dire :** 11/11 acceptation, aucune CVE critique, aucun constat ZAP bloquant, 9/9
-conformité. Mentionner que ZAP est en baseline : choix assumé lié aux 4 Go, pas une
-économie déguisée.
+**À dire :** 11/11 acceptation et 9/9 conformité (résultats des scripts) ; pour les CVE et
+pour ZAP, annoncer le résultat réel du build : `[À REMPLIR: résultat réel du scan]`.
+Mentionner que ZAP est en baseline : choix assumé lié aux 4 Go, pas une économie déguisée.
 
 ---
 
@@ -128,11 +129,13 @@ republié.
 
 ### 12. Le pipeline consolidé
 
-**À l'écran :** capture 25 (20 stages) + les 12 paramètres.
+**À l'écran :** capture 25 (21 stages) + les 14 paramètres.
 
 **À dire :** un seul pipeline, quatre phases, des paramètres pour tout ce qui est lourd ou
 optionnel (SonarQube, déploiement production, monitoring). L'ordre est contraint par la
-mémoire : SonarQube en dernier pour ne jamais coïncider avec ZAP.
+mémoire : SonarQube en dernier pour ne jamais coïncider avec ZAP. Si la clé NVD est refusée,
+`RUN_DEPENDENCY_CHECK` se décoche — le stage est sauté, pas abaissé — et le scan Trivy des
+dépendances continue.
 
 ---
 

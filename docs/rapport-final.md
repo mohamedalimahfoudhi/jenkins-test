@@ -10,6 +10,13 @@
 > les résultats d'exécution (builds, tests, mesures sur la VM) sont donc prouvés par ces
 > captures, et les seuils, versions et expressions cités ici sont ceux du dépôt, vérifiables
 > en une commande.
+>
+> **Résultats de scan : à remplir.** Tout résultat produit par un outil de scan (Trivy,
+> Dependency-Check, ZAP, gitleaks, SonarQube) est marqué
+> `[À REMPLIR: résultat réel du scan]` : il se recopie depuis les captures du build Jenkins
+> de la VM. Aucun chiffre de scan n'est affirmé ici avant d'avoir été produit par ce build.
+> Les résultats de scripts (nombre de contrôles) et les faits du dépôt (seuils, versions,
+> nombre de stages) ne sont pas concernés : ils se vérifient en une commande.
 
 ---
 
@@ -79,10 +86,12 @@ menaces retenues et de leur traitement :
 * **Dockerfile** : image de base épinglée, utilisateur non-root, aucune dépendance de
   build dans l'image finale, `hadolint` sans avertissement.
 * **Dépendances maintenues** : Spring Boot 4.1.2 (spring-framework 7.0.10, Tomcat 11.0.27).
-  Ce n'était pas le choix initial : le scan Trivy a détecté 9 CVE critiques dans la version
-  3.3.5 et la porte du pipeline a imposé la mise à jour (§6, difficulté 11).
+  Ce n'était pas le choix initial : un scan Trivy lancé **sur le poste de développement**
+  (hors Jenkins) a détecté 9 CVE critiques dans la version 3.3.5, et la porte interdisant
+  toute CVE CRITIQUE impose au minimum cette version. Le résultat qui fait foi est celui du
+  build : `[À REMPLIR: résultat réel du scan]` (§6, difficulté 11).
 * **Pipeline** : *Build* → *Unit and security tests* (10 tests) → *Secrets scan* →
-  *Dependency scan* → *Dockerfile lint*.
+  *Dependency scan (Dependency-Check)* → *Dependency scan (Trivy fs)* → *Dockerfile lint*.
 
 ### 2.4 Preuves
 
@@ -91,9 +100,10 @@ menaces retenues et de leur traitement :
 | 1 | Pipeline Phase 1 vert, stages de sécurité visibles |
 | 2 | Hook pre-commit qui refuse un faux secret |
 | 3 | 10 tests JUnit passés |
-| 4 | Rapport gitleaks (aucun secret sur tout l'historique) |
-| 5 | Rapport HTML Dependency-Check |
-| 6 | hadolint : aucune alerte |
+| 4 | Rapport gitleaks — résultat : `[À REMPLIR: résultat réel du scan]` |
+| 5 | Rapport HTML Dependency-Check — résultat : `[À REMPLIR: résultat réel du scan]` |
+| 6 | hadolint — résultat : `[À REMPLIR: résultat réel du scan]` |
+| 26 | Scan Trivy des dépendances (`reports/trivy-fs-resolved-report.txt`) — résultat : `[À REMPLIR: résultat réel du scan]` |
 
 ### 2.5 Limites de la phase
 
@@ -101,6 +111,10 @@ menaces retenues et de leur traitement :
   serveur est une garantie.
 * Dependency-Check ne détecte que les CVE **publiées** ; il ne remplace pas une revue de
   code.
+* **Deux scans de dépendances, complémentaires.** Dependency-Check interroge le flux NVD et
+  exige une clé API valide ; le scan Trivy des dépendances résolues par Maven compare le
+  même jeu à sa propre base, sans clé ni quota, et sans Docker. L'un reste utile quand
+  l'autre est indisponible — les deux bases ne publient d'ailleurs pas le même jour.
 
 ---
 
@@ -139,7 +153,7 @@ JSON invalide (4xx, sans trace) ; refus d'un corps trop volumineux ; route incon
 |---|---|
 | 7 | Tests d'acceptation : 11/11 |
 | 8 | Rapport ZAP baseline (HTML) |
-| 9 | Rapport Trivy (aucune CRITIQUE) |
+| 9 | Rapport Trivy de l'image — résultat : `[À REMPLIR: résultat réel du scan]` |
 | 10 | Compliance : 9/9 |
 | 11 | `infra-check.sh` sur la VM |
 | 12 | Pipeline Phase 2 : 7 stages verts |
@@ -347,13 +361,18 @@ problème ci-dessous a été rencontré, diagnostiqué et corrigé.
 | 8 | Échec intermittent du smoke test alors que l'application servait les métriques | `curl … \| grep -q` : `grep` ferme le tube au premier résultat, `curl` meurt de SIGPIPE (141) et `pipefail` transforme un succès en échec | corps de réponse capturé **avant** le filtrage (5 exécutions consécutives stables) |
 | 9 | Le `post` supprimait le réseau Docker utilisé par la pile d'observation | `docker network rm` cassait la cible Prometheus | le réseau n'est supprimé que si aucun conteneur n'y est attaché |
 | 10 | 4 Go de RAM insuffisants pour tout | Jenkins + ZAP + SonarQube + pile dépassent la RAM | SonarQube optionnel et **en dernier**, ZAP en baseline, limites mémoire sur les conteneurs, OSSEC écarté au profit de fail2ban |
-| 11 | **9 vulnérabilités critiques** dans nos propres dépendances | Trivy remonte 7 CVE Tomcat (10.1.31) et 1 CVE `spring-webmvc` 6.1.14, corrigées en 10.1.55+/7.0.9 ; Boot 3.3.5 est hors support | montée en **Spring Boot 4.1.2** (Spring 7.0.10, Tomcat 11.0.27) ; `@AutoConfigureMockMvc` déplacé dans un module dédié ; re-scan : **aucune vulnérabilité** |
+| 11 | 9 vulnérabilités critiques dans nos propres dépendances (scan lancé hors Jenkins) | un `trivy` exécuté sur le poste de développement remonte 7 CVE Tomcat (10.1.31) et 1 CVE `spring-webmvc` 6.1.14, corrigées en 10.1.55+/7.0.9 ; Boot 3.3.5 est hors support | montée en **Spring Boot 4.1.2** (Spring 7.0.10, Tomcat 11.0.27) ; `@AutoConfigureMockMvc` déplacé dans un module dédié ; **résultat à confirmer par le build Jenkins : `[À REMPLIR: résultat réel du scan]`** |
+
+> **Provenance du point 11.** Le chiffre de 9 CVE critiques ne vient pas de Jenkins : il
+> vient d'un scan `trivy` lancé sur le poste de développement où le pipeline a été écrit,
+> avant la montée de version. Jenkins n'a encore produit aucun résultat Trivy ni
+> Dependency-Check ; les seuls chiffres à citer sont donc ceux du build de la VM.
 
 ---
 
 ## 7. Pipeline consolidé
 
-`Jenkinsfile` sur `devsecops-final` : **20 stages**, **12 paramètres booléens**. La
+`Jenkinsfile` sur `devsecops-final` : **21 stages**, **14 paramètres booléens**. La
 référence complète (paramètres, portes, artefacts, ordre, dépannage) est dans
 [`docs/pipeline-overview.md`](pipeline-overview.md) et l'inventaire des outils dans
 [`docs/tools-table.md`](tools-table.md).
@@ -365,28 +384,31 @@ référence complète (paramètres, portes, artefacts, ordre, dépannage) est da
 | 3 | Build | 1 | compilation |
 | 4 | Unit and security tests | 1 | 10 tests, rapport JUnit |
 | 5 | Secrets scan (Gitleaks) | 1 | `gitleaks-report.json` |
-| 6 | Dependency scan (OWASP Dependency-Check) | 1 | rapport HTML/XML |
-| 7 | Dockerfile lint (hadolint) | 1 | `hadolint-report.txt` |
-| 8 | Container image (build) | 2 | identifiant d'image |
-| 9 | Container scan (Trivy) | 2 | `trivy-report.*` |
-| 10 | Deploy application container | 2 | service joignable (18080) |
-| 11 | DAST (OWASP ZAP baseline) | 2 | `zap-report.html/json` |
-| 12 | Security acceptance tests | 2 | `acceptance-report.txt` (11) |
-| 13 | Infrastructure test (VM) | 2 | `infra-report.txt` |
-| 14 | Compliance check (policy) | 2 | `compliance-report.txt` (9) |
-| 15 | Deploy production container | 3 | service joignable (18081), secret injecté |
-| 16 | Security smoke tests | 3 | `smoke-report.txt` (13) |
-| 17 | Configuration safety check | 3 | `config-safety-report.txt` (8) |
-| 18 | Operations: monitoring stack | 4 | pile démarrée |
-| 19 | Operations: metrics and alerts check | 4 | `monitoring-report.txt` (14) |
-| 20 | SAST (SonarQube) | 1 | *quality gate* (optionnel) |
+| 6 | Dependency scan (OWASP Dependency-Check) | 1 | rapport HTML/XML, porte CVSS ≥ 9 |
+| 7 | Dependency scan (Trivy fs) | 1 | `trivy-fs-resolved-report.*`, SBOM CycloneDX, porte CRITIQUE, sans clé API |
+| 8 | Dockerfile lint (hadolint) | 1 | `hadolint-report.txt` |
+| 9 | Container image (build) | 2 | identifiant d'image |
+| 10 | Container scan (Trivy) | 2 | `trivy-report.*` |
+| 11 | Deploy application container | 2 | service joignable (18080) |
+| 12 | DAST (OWASP ZAP baseline) | 2 | `zap-report.html/json` |
+| 13 | Security acceptance tests | 2 | `acceptance-report.txt` (11) |
+| 14 | Infrastructure test (VM) | 2 | `infra-report.txt` |
+| 15 | Compliance check (policy) | 2 | `compliance-report.txt` (9) |
+| 16 | Deploy production container | 3 | service joignable (18081), secret injecté |
+| 17 | Security smoke tests | 3 | `smoke-report.txt` (13) |
+| 18 | Configuration safety check | 3 | `config-safety-report.txt` (8) |
+| 19 | Operations: monitoring stack | 4 | pile démarrée |
+| 20 | Operations: metrics and alerts check | 4 | `monitoring-report.txt` (14) |
+| 21 | SAST (SonarQube) | 1 | *quality gate* (optionnel) |
 
-**Paramètres (12).** Tout ce qui est lourd, optionnel ou dépend d'un identifiant est un
+**Paramètres (14).** Tout ce qui est lourd, optionnel ou dépend d'un identifiant est un
 paramètre désactivé par défaut, pour qu'un build ordinaire reste sûr sur 4 Go :
 
 | Paramètre | Défaut | Effet |
 |---|---|---|
 | `RUN_SONAR` | désactivé | analyse SAST et *quality gate* SonarQube (≈ 2 Go) |
+| `RUN_DEPENDENCY_CHECK` | activé | stage Dependency-Check (flux NVD, clé `nvd-api-key`) ; à désactiver **uniquement** si la clé est refusée |
+| `RUN_TRIVY_FS` | activé | scan Trivy des dépendances résolues, sans clé API ni Docker |
 | `BUILD_IMAGE` | activé | construit `devsecops-demo:ci` |
 | `TRIVY_SCAN` | activé | scan d'image, échec sur CRITIQUE |
 | `DEPLOY_CONTAINER` | activé | conteneur applicatif sur 18080 |
@@ -408,6 +430,15 @@ coûte moins cher à trouver avant). Le déploiement précède le DAST et les te
 d'acceptation (ils ont besoin d'un service vivant). SonarQube est **en dernier** pour ne
 jamais coïncider avec ZAP. Budget approximatif : Jenkins ≈ 1 Go, application ≈ 300 Mo,
 ZAP ≈ 1 Go, SonarQube ≈ 2 Go, pile d'observation ≈ 960 Mo.
+
+**Portes de dépendances.** Les deux scans restent à la même exigence : CRITIQUE / CVSS ≥ 9.
+Si la clé NVD est refusée (`Invalid apiKey`), `RUN_DEPENDENCY_CHECK` se décoche et le scan
+Trivy continue de couvrir les mêmes dépendances : le stage est *sauté*, jamais abaissé.
+
+**Contrôle de configuration.** Le stage s'exécute par défaut : il inspecte le conteneur de
+production quand il existe, sinon celui d'acceptation — l'assertion sur le secret injecté ne
+s'applique alors qu'à la production et s'affiche comme information — et il échoue s'il n'y a
+aucun conteneur à inspecter.
 
 **Nettoyage.** Les conteneurs applicatifs sont supprimés à chaque build (succès ou échec) ;
 la pile d'observation reste en place pour la démonstration et se retire avec
@@ -466,8 +497,10 @@ Tous les rapports sont archivés par build sous `reports/` (voir §7) et consult
 Jenkins (artefacts + vues JUnit, HTML Publisher). Les captures attendues et la commande qui
 les produit sont listées dans [`docs/captures/README.md`](captures/README.md).
 
-Les contrôles qui ont pu être exécutés hors VM (build, 10 tests, gitleaks, hadolint,
-shellcheck, trivy, validation Compose/YAML/JSON, smoke 13/13, acceptance 11/11,
-monitoring 14/14, compliance 9/9, tests négatifs) sont consignés avec leurs résultats dans
-[`docs/verification-here.md`](verification-here.md), qui précise aussi ce qui ne peut être
-prouvé que sur la VM.
+Les contrôles exécutés dans l'**environnement de développement** (build, 10 tests, gitleaks,
+hadolint, shellcheck, validation Compose/YAML/JSON, smoke 13/13, acceptance 11/11,
+monitoring 14/14, compliance 9/9, tests négatifs) sont consignés dans
+[`docs/verification-here.md`](verification-here.md), avec la liste de ce qui ne peut être
+prouvé que sur la VM. Ce fichier décrit un poste de développement, **pas la VM ni Jenkins** :
+les résultats de scan cités dans ce rapport restent marqués
+`[À REMPLIR: résultat réel du scan]` jusqu'à ce que le build Jenkins les produise.
