@@ -96,7 +96,9 @@ import json, sys
 try:
     groups = json.load(sys.stdin).get("data", {}).get("groups", [])
     names = [r.get("name") for g in groups for r in g.get("rules", [])]
-    print(f"{len(names)}|{",".join(names)}")
+    # str() + concatenation, not an f-string with nested double quotes: the
+    # latter needs Python 3.12 (PEP 701) and this runs on Ubuntu 22.04 (3.10).
+    print(str(len(names)) + "|" + ",".join(names))
 except Exception:
     print("0|")
 ')"

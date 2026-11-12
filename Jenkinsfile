@@ -112,7 +112,11 @@ pipeline {
                     "RUN_DEPENDENCY_CHECK=${params.RUN_DEPENDENCY_CHECK}",
                     "RUN_TRIVY_FS=${params.RUN_TRIVY_FS}",
                     "TRIVY_SCAN=${params.TRIVY_SCAN}",
-                    "NEEDS_DOCKER=${params.BUILD_IMAGE || params.TRIVY_SCAN || params.DEPLOY_CONTAINER || params.ZAP_SCAN || params.PROD_DEPLOY || params.CONFIG_SAFETY || params.SECURITY_SMOKE || params.MONITORING}"
+                    "NEEDS_DOCKER=${params.BUILD_IMAGE || params.TRIVY_SCAN || params.DEPLOY_CONTAINER || params.ZAP_SCAN || params.PROD_DEPLOY || params.CONFIG_SAFETY || params.SECURITY_SMOKE || params.MONITORING}",
+                    // The deploy stages poll /hello with `curl -fsS` and swallow its
+                    // stderr, so a missing curl looks like a silent 40-second
+                    // timeout. Check it up front instead.
+                    "NEEDS_CURL=${params.DEPLOY_CONTAINER || params.PROD_DEPLOY || params.SECURITY_SMOKE || params.CONFIG_SAFETY || params.MONITORING || params.RUN_DEPENDENCY_CHECK}"
                 ]) {
                     sh '''
                         set -u
@@ -160,6 +164,9 @@ pipeline {
                         else
                             echo "SKIP  docker                  no stage in this build uses Docker"
                         fi
+                        if [ "$NEEDS_CURL" = "true" ]; then
+                            check "curl"               curl --version
+                        fi
                         if [ "$RUN_DEPENDENCY_CHECK" = "true" ]; then
                             check_path "dependency-check CLI" "$DC_HOME/bin/dependency-check.sh"
                         else
@@ -172,6 +179,7 @@ pipeline {
                             echo "Fix on the VM, then rebuild:"
                             echo "  gitleaks, hadolint    : sudo bash scripts/install-tools.sh"
                             echo "  trivy, docker, images : sudo bash scripts/install-phase2.sh"
+                        echo "  curl                  : sudo apt-get install -y curl"
                             echo "  dependency-check CLI  : sudo bash scripts/install-dependency-check.sh"
                             echo "  docker group          : sudo usermod -aG docker jenkins && sudo systemctl restart jenkins"
                             echo "Tool names must stay jdk21 and maven in Manage Jenkins > Global Tool Configuration."
@@ -623,10 +631,39 @@ pipeline {
                 withCredentials([string(credentialsId: 'app-api-key', variable: 'APP_API_KEY')]) {
                     sh '''
                         set -eu
+                        # Jenkins runs sh with -x: without this, the trace of the
+                        # printf below prints the key in clear. Verified locally
+                        # with a dummy value ("+ printf ... DEMO-...").
+                        set +x
                         umask 077
                         ENVFILE="$(mktemp)"
                         trap 'rm -f "$ENVFILE"' EXIT
-                        printf 'APP_API_KEY=%s\n' "$APP_API_KEY" > "$ENVFILE"
+                        # A credential pasted on Windows arrives with a trailing CR/LF.
+                        # Command substitution drops trailing newlines; strip any
+                        # trailing CR as well. A line break *inside* the value is a
+                        # different thing: docker --env-file splits on newline, so the
+                        # value would be truncated and the remainder read as a
+                        # variable name. That cannot be represented, so fail loudly
+                        # instead of silently sending a collapsed secret.
+                        CR="$(printf '\r')"
+                        APP_KEY="$(printf '%s' "$APP_API_KEY")"
+                        while [ "${APP_KEY%"$CR"}" != "$APP_KEY" ]; do
+                            APP_KEY="${APP_KEY%"$CR"}"
+                        done
+                        if [ "$(printf '%s\n' "$APP_KEY" | wc -l | tr -d ' ')" -ne 1 ]; then
+                            echo "app-api-key contains a line break inside the value - re-enter it as a single line"
+                            exit 1
+                        fi
+                        if [ -z "$APP_KEY" ]; then
+                            echo "app-api-key is empty once line breaks are removed - fix the credential"
+                            exit 1
+                        fi
+                        if [ "$APP_KEY" = "replace-me" ]; then
+                            echo "app-api-key still holds the .env.example placeholder - set a real value"
+                            exit 1
+                        fi
+                        printf 'APP_API_KEY=%s\n' "$APP_KEY" > "$ENVFILE"
+                        unset APP_KEY APP_API_KEY
                         docker network inspect devsecops-net >/dev/null 2>&1 || docker network create devsecops-net
                         docker rm -f devsecops-prod >/dev/null 2>&1 || true
                         docker run -d --name devsecops-prod --network devsecops-net \
@@ -650,8 +687,11 @@ pipeline {
                 expression { params.SECURITY_SMOKE }
             }
             steps {
-                sh '''
-                    set -o pipefail
+                // /bin/sh is dash on Ubuntu and has no "-o pipefail"; the shebang
+                // must be the script's first characters. It also suppresses the
+                // implicit -e Jenkins passes, so errexit is restated here.
+                sh '''#!/usr/bin/env bash
+                    set -eo pipefail
                     mkdir -p reports
                     # Smoke the production container when it exists, otherwise the acceptance one.
                     if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx devsecops-prod; then
@@ -675,8 +715,11 @@ pipeline {
                 expression { params.CONFIG_SAFETY }
             }
             steps {
-                sh '''
-                    set -o pipefail
+                // /bin/sh is dash on Ubuntu and has no "-o pipefail"; the shebang
+                // must be the script's first characters. It also suppresses the
+                // implicit -e Jenkins passes, so errexit is restated here.
+                sh '''#!/usr/bin/env bash
+                    set -eo pipefail
                     mkdir -p reports
                     # The injected secret only exists on the production container.
                     # With PROD_DEPLOY off, check the acceptance container instead
@@ -720,8 +763,11 @@ pipeline {
                 expression { params.MONITORING }
             }
             steps {
-                sh '''
-                    set -o pipefail
+                // Last stage that piped into tee under dash: the shebang selects
+                // bash, and errexit is restated because the shebang drops Jenkins'
+                // implicit -e.
+                sh '''#!/usr/bin/env bash
+                    set -eo pipefail
                     mkdir -p reports
                     bash scripts/monitoring-check.sh | tee reports/monitoring-report.txt
                 '''

@@ -1,5 +1,22 @@
 # What was verified outside the VM (and what cannot be)
 
+> **Update — Jenkins build #11 on the VM (Phase 2 only).** Since this file was written,
+> one real Jenkins build has exercised the acceptance phase: image built, Trivy image
+> scan 0 CRITICAL, container deployed, ZAP baseline 66 PASS / 0 FAIL / 2 WARN,
+> acceptance tests 11/11. Phase 3 (production deploy, smoke, configuration safety) and
+> Phase 4 (monitoring) have still never run on the VM, and the NVD API key is still
+> rejected there — Dependency-Check is skipped, never weakened. The pipeline was also
+> corrected after this file: every `sh` block that pipes into `tee` now starts with
+> `#!/usr/bin/env bash` (dash has no `-o pipefail`), and `monitoring-check.sh` no longer
+> uses a Python 3.12-only f-string. Parameter sets and expected output for the remaining
+> phases: [final-validation-guide.md](final-validation-guide.md).
+
+Verdicts used below and in the rest of the documentation: **IMPLEMENTED** (code exists),
+**STATICALLY VERIFIED** (syntax/lint/parse gates only), **RUNTIME-TESTED** (observed in a
+Jenkins build on the VM), **BLOCKED** (environmental prerequisite missing), **NOT TESTED**
+(never ran). A local simulation or a harness with stubbed binaries is *statically
+verified* at best — never runtime-tested.
+
 This file exists so no result is ambiguous. It records **exactly** what was executed in the
 development environment where the pipeline was written, with the observed output, and it
 names what that environment physically cannot run. Anything not in the "executed" table is

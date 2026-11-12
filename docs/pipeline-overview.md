@@ -8,6 +8,11 @@ Everything here describes what the pipeline **does**, in which order, why that
 order, and what fails the build. If a claim in the report cannot be traced to a
 row in these tables, it should not be in the report.
 
+Status vocabulary used across the documentation — **IMPLEMENTED** (code exists),
+**STATICALLY VERIFIED** (syntax/lint/parse gates), **RUNTIME-TESTED** (observed in a
+Jenkins build), **BLOCKED** (environmental prerequisite missing), **NOT TESTED** (never
+ran) — with the per-phase table in [release-checklist.md](release-checklist.md).
+
 ---
 
 ## 1. Shape of the pipeline
@@ -211,6 +216,9 @@ Full demonstration build:
 Individual scripts can also be run by hand on the VM; each one documents its
 `BASE_URL`/`CONTAINER`/`MONITORING_ENV_FILE` overrides at the top of the file.
 
+For a phase-by-phase validation session (exact parameter sets, expected console lines,
+artifacts, verdicts), use [final-validation-guide.md](final-validation-guide.md).
+
 ---
 
 ## 7. Failure playbook
@@ -238,9 +246,11 @@ Individual scripts can also be run by hand on the VM; each one documents its
 
 ## 8. First run on the VM — the most likely failure per stage
 
-None of the stages below has ever executed: no build has been run on the VM yet, so
-these are the failures to expect first, on Ubuntu 22.04 with 4 GB of RAM and Jenkins
-running as the `jenkins` user. Each has a one-line fix.
+Jenkins build #11 ran the Phase 1 and Phase 2 stages on the VM (image built, image scan
+0 CRITICAL, container deployed, ZAP 66 PASS / 0 FAIL / 2 WARN, acceptance 11/11).
+Phase 3 and Phase 4 have not executed yet, so the rows for those stages are still
+predictions rather than observations. Environment: Ubuntu 22.04, 4 GB of RAM, Jenkins
+running as the `jenkins` user. Each row has a one-line fix.
 
 | Stage | Most likely failure | One-line fix |
 |---|---|---|
