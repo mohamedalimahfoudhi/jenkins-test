@@ -538,8 +538,15 @@ pipeline {
                 expression { params.ACCEPTANCE_TESTS }
             }
             steps {
-                sh '''
-                    set -o pipefail
+                // Jenkins runs an sh block with the system /bin/sh plus -xe; on
+                // Ubuntu that is dash, where "set -o pipefail" is not a valid
+                // option ("set: Illegal option -o pipefail"). The shebang must be
+                // the very first characters of the script so Jenkins selects bash.
+                // A shebang also suppresses the implicit -e, so errexit is restored
+                // explicitly beside pipefail: dropping it would let an earlier
+                // failing command pass unnoticed.
+                sh '''#!/usr/bin/env bash
+                    set -eo pipefail
                     mkdir -p reports
                     BASE_URL=http://127.0.0.1:18080 bash scripts/security-acceptance-test.sh \
                         | tee reports/acceptance-report.txt
@@ -561,8 +568,12 @@ pipeline {
                 // this build actually runs that stage; otherwise it reports it as
                 // information instead of failing the build for an unused tool.
                 withEnv(["RUN_DEPENDENCY_CHECK=${params.RUN_DEPENDENCY_CHECK}"]) {
-                    sh '''
-                        set -o pipefail
+                    // Same interpreter problem as the acceptance stage: /bin/sh is
+                    // dash on Ubuntu, which has no "-o pipefail". The shebang must
+                    // be the script's first characters, and it also removes the
+                    // implicit -e, so errexit is restated here.
+                    sh '''#!/usr/bin/env bash
+                        set -eo pipefail
                         mkdir -p reports
                         REQUIRE_DEPENDENCY_CHECK="${RUN_DEPENDENCY_CHECK:-1}" \
                             bash scripts/infra-check.sh | tee reports/infra-report.txt
@@ -581,8 +592,12 @@ pipeline {
                 expression { params.COMPLIANCE_CHECK }
             }
             steps {
-                sh '''
-                    set -o pipefail
+                // Same interpreter problem as the acceptance stage: /bin/sh is
+                // dash on Ubuntu, which has no "-o pipefail". The shebang must
+                // be the script's first characters, and it also removes the
+                // implicit -e, so errexit is restated here.
+                sh '''#!/usr/bin/env bash
+                    set -eo pipefail
                     mkdir -p reports
                     bash scripts/compliance-check.sh | tee reports/compliance-report.txt
                 '''
