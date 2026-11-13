@@ -96,7 +96,8 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
-                sh 'git log --oneline -5'
+                // Kept as evidence too: the report pages show the revision built.
+                sh 'mkdir -p reports && git log --oneline -5 | tee reports/checkout-report.txt'
             }
         }
 
@@ -118,8 +119,12 @@ pipeline {
                     // timeout. Check it up front instead.
                     "NEEDS_CURL=${params.DEPLOY_CONTAINER || params.PROD_DEPLOY || params.SECURITY_SMOKE || params.CONFIG_SAFETY || params.MONITORING || params.RUN_DEPENDENCY_CHECK}"
                 ]) {
-                    sh '''
-                        set -u
+                    sh '''#!/usr/bin/env bash
+                        set -uo pipefail
+                        mkdir -p reports
+                        # Tee the whole check so the Preflight report page shows the
+                        # same verdicts and tool versions the console shows.
+                        {
                         FAILED=0
                         DC_HOME="${DC_HOME:-/opt/dependency-check}"
 
@@ -186,6 +191,7 @@ pipeline {
                             exit 1
                         fi
                         echo "Preflight passed: every tool this build needs is usable."
+                        } 2>&1 | tee reports/preflight-report.txt
                     '''
                 }
             }
@@ -193,13 +199,24 @@ pipeline {
 
         stage('Build') {
             steps {
-                sh 'mvn -B -ntp clean compile'
+                // The shebang selects bash (Jenkins otherwise uses dash, which has
+                // no pipefail) and drops the implicit -e, so errexit is restated:
+                // without it the tee would hide a failing compile.
+                sh '''#!/usr/bin/env bash
+                    set -eo pipefail
+                    mkdir -p reports
+                    mvn -B -ntp clean compile 2>&1 | tee reports/maven-compile-report.txt
+                '''
             }
         }
 
         stage('Unit and security tests') {
             steps {
-                sh 'mvn -B -ntp test'
+                sh '''#!/usr/bin/env bash
+                    set -eo pipefail
+                    mkdir -p reports
+                    mvn -B -ntp test 2>&1 | tee reports/maven-test-report.txt
+                '''
             }
             post {
                 always {
@@ -214,15 +231,27 @@ pipeline {
         // history, so a secret committed earlier is still found.
         stage('Secrets scan (Gitleaks)') {
             steps {
-                sh '''
-                    set -eu
+                sh '''#!/usr/bin/env bash
+                    # The exit code is kept: gitleaks exits non-zero when it finds a
+                    # secret, and piping through tee must not swallow that.
+                    set -uo pipefail
                     mkdir -p reports
-                    gitleaks version
+                    GITLEAKS_RC=0
+                    gitleaks version 2>&1 | tee reports/gitleaks-log.txt
                     gitleaks git \
                         --report-format json \
                         --report-path reports/gitleaks-report.json \
                         --redact \
-                        --verbose
+                        --verbose 2>&1 | tee -a reports/gitleaks-log.txt || GITLEAKS_RC=$?
+                    # Facts for the report page: how much was scanned. No secret and
+                    # no finding detail is copied here, only counts.
+                    {
+                        echo "version: $(gitleaks version 2>&1 | head -n 1)"
+                        echo "commits: $(git rev-list --count HEAD)"
+                        echo "tracked_files: $(git ls-files | wc -l | tr -d ' ')"
+                        echo "worktree_size: $(du -sh --exclude=.git . 2>/dev/null | cut -f1)"
+                    } > reports/gitleaks-summary.txt
+                    exit "$GITLEAKS_RC"
                 '''
             }
             post {
@@ -276,8 +305,8 @@ pipeline {
                             echo "(or untick RUN_DEPENDENCY_CHECK - the Trivy dependency scan still runs)"
                             exit 1
                         fi
-                        mkdir -p reports
-                        "$DC_CLI" --version
+                        mkdir -p reports reports/state
+                        "$DC_CLI" --version 2>&1 | tee reports/state/dependency-check-version.txt
 
                         # The CLI scans jars, and spring-boot-starter-parent owns the
                         # versions in pom.xml, so scanning the source tree alone would
@@ -332,14 +361,9 @@ pipeline {
             post {
                 always {
                     archiveArtifacts artifacts: 'reports/dependency-check-report.*', allowEmptyArchive: true
-                    publishHTML(target: [
-                        allowMissing         : true,
-                        alwaysLinkToLastBuild: true,
-                        keepAll              : true,
-                        reportDir            : 'reports',
-                        reportFiles          : 'dependency-check-report.html',
-                        reportName           : 'Dependency-Check report'
-                    ])
+                    // Published from the pipeline's post block with every other tool, so
+                    // one link per tool appears on the job page and a failed stage still
+                    // publishes its report.
                 }
             }
         }
@@ -440,10 +464,10 @@ pipeline {
                 expression { params.BUILD_IMAGE }
             }
             steps {
-                sh '''
-                    set -eu
+                sh '''#!/usr/bin/env bash
+                    set -euo pipefail
                     mkdir -p reports
-                    docker build -t devsecops-demo:ci .
+                    docker build -t devsecops-demo:ci . 2>&1 | tee reports/docker-build-report.txt
                     docker image inspect devsecops-demo:ci --format '{{.Id}}' > reports/image-id.txt
                     echo "built devsecops-demo:ci ($(cat reports/image-id.txt))"
                 '''
@@ -493,11 +517,18 @@ pipeline {
                     docker network inspect devsecops-net >/dev/null 2>&1 || docker network create devsecops-net
                     docker rm -f devsecops-app >/dev/null 2>&1 || true
                     # 8080 on the VM belongs to Jenkins, so the app is published on 18080.
+                    {
+                        echo "image: devsecops-demo:ci"
+                        echo "container: devsecops-app"
+                        echo "network: devsecops-net"
+                        echo "url: http://127.0.0.1:18080/hello"
+                    } > reports/deploy-report.txt
                     docker run -d --name devsecops-app --network devsecops-net \
                         -p 18080:8080 devsecops-demo:ci
                     for i in $(seq 1 40); do
                         if curl -fsS http://127.0.0.1:18080/hello >/dev/null 2>&1; then
-                            echo "app ready after ${i}s on http://127.0.0.1:18080"
+                            echo "app ready after ${i}s on http://127.0.0.1:18080" \
+                                | tee -a reports/deploy-report.txt
                             exit 0
                         fi
                         sleep 1
@@ -529,14 +560,8 @@ pipeline {
             post {
                 always {
                     archiveArtifacts artifacts: 'reports/zap-report.*', allowEmptyArchive: true
-                    publishHTML(target: [
-                        allowMissing         : true,
-                        alwaysLinkToLastBuild: true,
-                        keepAll              : true,
-                        reportDir            : 'reports',
-                        reportFiles          : 'zap-report.html',
-                        reportName           : 'OWASP ZAP baseline report'
-                    ])
+                    // The ZAP pages are published from the pipeline's post block
+                    // with the other tools, so exactly one link per tool appears.
                 }
             }
         }
@@ -664,13 +689,21 @@ pipeline {
                         fi
                         printf 'APP_API_KEY=%s\n' "$APP_KEY" > "$ENVFILE"
                         unset APP_KEY APP_API_KEY
+                        {
+                            echo "image: devsecops-demo:ci"
+                            echo "container: devsecops-prod"
+                            echo "network: devsecops-net"
+                            echo "url: http://127.0.0.1:18081/hello"
+                            echo "runtime secret: app-api-key (value never recorded)"
+                        } > reports/prod-deploy-report.txt
                         docker network inspect devsecops-net >/dev/null 2>&1 || docker network create devsecops-net
                         docker rm -f devsecops-prod >/dev/null 2>&1 || true
                         docker run -d --name devsecops-prod --network devsecops-net \
                             --env-file "$ENVFILE" -p 18081:8080 devsecops-demo:ci
                         for i in $(seq 1 40); do
                             if curl -fsS http://127.0.0.1:18081/hello >/dev/null 2>&1; then
-                                echo "production container ready after ${i}s on port 18081"
+                                echo "production container ready after ${i}s on port 18081" \
+                                | tee -a reports/prod-deploy-report.txt
                                 exit 0
                             fi
                             sleep 1
@@ -754,7 +787,11 @@ pipeline {
                 expression { params.MONITORING }
             }
             steps {
-                sh 'bash scripts/install-phase4.sh'
+                sh '''#!/usr/bin/env bash
+                    set -eo pipefail
+                    mkdir -p reports
+                    bash scripts/install-phase4.sh 2>&1 | tee reports/monitoring-stack-report.txt
+                '''
             }
         }
 
@@ -789,7 +826,14 @@ pipeline {
             }
             steps {
                 withSonarQubeEnv('SonarQube') {
-                    sh 'mvn -B -ntp sonar:sonar'
+                    // The analysis result itself stays on the SonarQube server; the
+                    // log is kept so the report page can show whether the scanner
+                    // ran and what it said, instead of guessing any figure.
+                    sh '''#!/usr/bin/env bash
+                        set -eo pipefail
+                        mkdir -p reports
+                        mvn -B -ntp sonar:sonar 2>&1 | tee reports/sonar-report.txt
+                    '''
                 }
                 timeout(time: 1, unit: 'HOURS') {
                     waitForQualityGate abortPipeline: true
@@ -817,6 +861,272 @@ pipeline {
                     fi
                 fi
             '''
+            // ---- Reports: one published HTML page per tool -------------------
+            // HTML Publisher attaches each report to the build AND to the job: the
+            // job-page link is the plugin's project action, resolved to lastBuild
+            // because alwaysLinkToLastBuild is set, and it appears only once the
+            // report directory exists. Done here, in post { always }, and not in a
+            // stage: declarative skips every later stage once one has failed, and a
+            // red build is exactly when these reports matter most.
+            //
+            // render-reports.py exits 0 even with nothing to render, so publishing
+            // can never turn a green build red, and it never invents a result: a
+            // stage that did not run is reported as SKIPPED or NOT RUN. It always
+            // writes a page, so every tool's link exists after the first build.
+            //
+            // The build's parameters are recorded first, so each page can state
+            // whether its own stage was enabled for this build.
+            writeFile file: 'reports/state/params.txt', text: """BUILD_NUMBER=${env.BUILD_NUMBER}
+BUILD_URL=${env.BUILD_URL}
+JOB_NAME=${env.JOB_NAME}
+STARTED_MS=${currentBuild.startTimeInMillis}
+RESULT=${currentBuild.currentResult}
+RUN_SONAR=${params.RUN_SONAR}
+RUN_DEPENDENCY_CHECK=${params.RUN_DEPENDENCY_CHECK}
+RUN_TRIVY_FS=${params.RUN_TRIVY_FS}
+BUILD_IMAGE=${params.BUILD_IMAGE}
+TRIVY_SCAN=${params.TRIVY_SCAN}
+DEPLOY_CONTAINER=${params.DEPLOY_CONTAINER}
+ZAP_SCAN=${params.ZAP_SCAN}
+ACCEPTANCE_TESTS=${params.ACCEPTANCE_TESTS}
+INFRA_TEST=${params.INFRA_TEST}
+COMPLIANCE_CHECK=${params.COMPLIANCE_CHECK}
+PROD_DEPLOY=${params.PROD_DEPLOY}
+SECURITY_SMOKE=${params.SECURITY_SMOKE}
+CONFIG_SAFETY=${params.CONFIG_SAFETY}
+MONITORING=${params.MONITORING}
+"""
+            sh '''#!/usr/bin/env bash
+                if command -v python3 >/dev/null 2>&1; then
+                    python3 scripts/render-reports.py reports reports/html \
+                        --params reports/state/params.txt \
+                        --surefire target/surefire-reports || true
+                else
+                    echo "python3 is not available - the HTML report pages cannot be rendered"
+                fi
+            '''
+
+            // One entry per tool, in pipeline order. allowMissing keeps a tool that
+            // rendered nothing from hiding the others, keepAll keeps every build's
+            // own copy, alwaysLinkToLastBuild is what makes the job-page link point
+            // at the latest build.
+
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/checkout',
+                reportFiles          : 'index.html',
+                reportName           : 'Checkout Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/preflight',
+                reportFiles          : 'index.html',
+                reportName           : 'Preflight Tool Checks Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/compile',
+                reportFiles          : 'index.html',
+                reportName           : 'Maven Compile Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/unit-tests',
+                reportFiles          : 'index.html',
+                reportName           : 'Maven Tests Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/gitleaks',
+                reportFiles          : 'index.html',
+                reportName           : 'Gitleaks Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/dependency-check',
+                reportFiles          : 'index.html',
+                reportName           : 'Dependency-Check Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/trivy-fs',
+                reportFiles          : 'index.html',
+                reportName           : 'Trivy Filesystem Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/sonar',
+                reportFiles          : 'index.html',
+                reportName           : 'SonarQube Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/image-build',
+                reportFiles          : 'index.html',
+                reportName           : 'Docker Image Build Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/hadolint',
+                reportFiles          : 'index.html',
+                reportName           : 'Hadolint Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/trivy-image',
+                reportFiles          : 'index.html',
+                reportName           : 'Trivy Image Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/deploy',
+                reportFiles          : 'index.html',
+                reportName           : 'Application Deploy Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/zap',
+                reportFiles          : 'index.html',
+                reportName           : 'OWASP ZAP Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/acceptance',
+                reportFiles          : 'index.html',
+                reportName           : 'Acceptance Tests Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/infra',
+                reportFiles          : 'index.html',
+                reportName           : 'Infrastructure Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/compliance',
+                reportFiles          : 'index.html',
+                reportName           : 'Compliance Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/sbom',
+                reportFiles          : 'index.html',
+                reportName           : 'SBOM Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/prod-deploy',
+                reportFiles          : 'index.html',
+                reportName           : 'Production Deployment Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/smoke',
+                reportFiles          : 'index.html',
+                reportName           : 'Security Smoke Tests Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/config-safety',
+                reportFiles          : 'index.html',
+                reportName           : 'Configuration Safety Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/monitoring-stack',
+                reportFiles          : 'index.html',
+                reportName           : 'Monitoring Stack Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/prometheus',
+                reportFiles          : 'index.html',
+                reportName           : 'Prometheus Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/grafana',
+                reportFiles          : 'index.html',
+                reportName           : 'Grafana Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/alertmanager',
+                reportFiles          : 'index.html',
+                reportName           : 'Alertmanager Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/node-exporter',
+                reportFiles          : 'index.html',
+                reportName           : 'Node Exporter Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html/monitoring',
+                reportFiles          : 'index.html',
+                reportName           : 'Monitoring Validation Report'
+            ])
+            publishHTML(target: [
+                allowMissing         : true,
+                alwaysLinkToLastBuild: true,
+                keepAll              : true,
+                reportDir            : 'reports/html',
+                reportFiles          : 'index.html',
+                reportName           : 'All Reports'
+            ])
             archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
         }
         success {
